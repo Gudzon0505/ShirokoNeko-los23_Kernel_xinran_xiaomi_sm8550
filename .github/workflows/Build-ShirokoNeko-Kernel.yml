@@ -1,306 +1,93 @@
-name: Build vermeer kernel (GKI, Lineage 23, KSU/SukiSU, SUSFS v2.0)
+name: Build GudzonKernel (Vermeer A16)
 
 on:
   workflow_dispatch:
-    inputs:
-      root_solution:
-        description: "Root solution"
-        required: true
-        type: choice
-        default: "ksu"
-        options: [ "ksu", "sukisu" ]
-
-      sukisu_mode:
-        description: "SukiSU mode (only if root_solution=sukisu)"
-        required: true
-        type: choice
-        default: "susfs-main"
-        options: [ "main", "nongki", "susfs-main" ]
-
-      defconfig:
-        description: "Defconfig (leave empty for auto-detect)"
-        required: false
-        default: ""
-
-      zip_suffix:
-        description: "ZIP suffix (example: -GudzonKernel)"
-        required: false
-        default: "-GudzonKernel"
-
-      upload_ccache_debug:
-        description: "Upload ccache debug logs (usually not needed)"
-        required: true
-        type: boolean
-        default: false
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 360
-
-    env:
-      ARCH: arm64
-      SUBARCH: arm64
-
-      # Clang/LLVM build knobs commonly required by GKI trees
-      LLVM: "1"
-      LLVM_IAS: "1"
-
-      # ccache
-      CCACHE_COMPRESS: "true"
-      CCACHE_MAXSIZE: "5G"
-
-      # Toolchain
-      CC: "ccache clang"
-      LD: "ld.lld"
-      AR: "llvm-ar"
-      NM: "llvm-nm"
-      OBJCOPY: "llvm-objcopy"
-      OBJDUMP: "llvm-objdump"
-      STRIP: "llvm-strip"
-
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout Source
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: recursive
 
-      - name: Detect kernel source directory
-        id: kdir
-        shell: bash
+      - name: Install Toolchain (AOSP Clang 19)
         run: |
-          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y bc bison build-essential flex git lld llvm python3 rsync libssl-dev libelf-dev zip
+          mkdir -p $GITHUB_WORKSPACE/clang-aosp
+          curl -Lo clang.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r530567.tar.gz
+          tar -C $GITHUB_WORKSPACE/clang-aosp -xzf clang.tar.gz
 
-          if [[ -d "arch/arm64" && -d "drivers" && -f "Makefile" ]]; then
-            echo "KDIR=$PWD" >> "$GITHUB_OUTPUT"
-            echo "Kernel dir: $PWD"
-            exit 0
-          fi
-
-          if [[ -d "kernel/arch/arm64" && -d "kernel/drivers" && -f "kernel/Makefile" ]]; then
-            echo "KDIR=$PWD/kernel" >> "$GITHUB_OUTPUT"
-            echo "Kernel dir: $PWD/kernel"
-            exit 0
-          fi
-
-          echo "ERROR: cannot find kernel root."
-          echo "Expected: arch/arm64 + drivers + Makefile in repo root OR ./kernel"
-          echo "Repo root:"
-          ls -la
-          echo "kernel/ (if exists):"
-          ls -la kernel || true
-          exit 1
-
-      - name: Install dependencies
-        shell: bash
+      - name: Integrate SukiSU & SUSFS 2.0
         run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y \
-            git curl wget rsync zip unzip jq \
-            build-essential bc bison flex make \
-            libssl-dev libelf-dev zstd lz4 \
-            python3 python3-pip \
-            ccache clang lld llvm \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            dwarves
+          # Интеграция SukiSU
+          git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git sukisu-temp
+          chmod +x sukisu-temp/setup.sh
+          ./sukisu-temp/setup.sh susfs-main
+          rm -rf sukisu-temp
+          
+          # Интеграция SUSFS Patches
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b kernel-6.1 /tmp/susfs
+          cp /tmp/susfs/kernel/include/linux/susfs.h include/linux/
+          cp /tmp/susfs/kernel/fs/susfs.c fs/
+          
+          # Применение патчей к файловой системе (VFS)
+          patch -p1 < /tmp/susfs/kernel/fs/0001-vfs-Add-susfs-hooks-to-vfs-6.1.patch
+          patch -p1 < /tmp/susfs/kernel/include/linux/0001-vfs-Add-susfs-hooks-to-vfs-6.1.patch
 
-          echo "pahole version:"
-          pahole --version || true
-          echo "clang version:"
-          clang --version || true
-
-      - name: Prepare ccache
-        shell: bash
+      - name: Configure GudzonKernel
         run: |
-          set -euo pipefail
-          ccache -M 5G
-          ccache -z
-          ccache -s || true
-
-      - name: Integrate KernelSU (if selected)
-        if: ${{ inputs.root_solution == 'ksu' }}
-        working-directory: ${{ steps.kdir.outputs.KDIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
-
-      - name: Integrate SukiSU-Ultra (if selected)
-        if: ${{ inputs.root_solution == 'sukisu' }}
-        working-directory: ${{ steps.kdir.outputs.KDIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf /tmp/sukisu-ultra
-          git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/sukisu-ultra
-
-          echo "Searching setup.sh in SukiSU-Ultra repo..."
-          SETUP="$(find /tmp/sukisu-ultra -maxdepth 6 -type f -name 'setup.sh' | head -n 1 || true)"
-          if [[ -z "${SETUP}" ]]; then
-            echo "ERROR: setup.sh not found in SukiSU-Ultra repo"
-            find /tmp/sukisu-ultra -maxdepth 6 -type f | head -n 200
-            exit 1
-          fi
-
-          echo "Using setup script: ${SETUP}"
-          chmod +x "${SETUP}"
-          bash "${SETUP}" "${{ inputs.sukisu_mode }}"
-
-      - name: Select defconfig (auto if empty)
-        id: defc
-        working-directory: ${{ steps.kdir.outputs.KDIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          DEF_IN="${{ inputs.defconfig }}"
-          if [[ -n "${DEF_IN}" ]]; then
-            echo "defconfig=${DEF_IN}" >> "$GITHUB_OUTPUT"
-            echo "Selected (manual): ${DEF_IN}"
-            exit 0
-          fi
-
-          echo "Auto-detect defconfig..."
-          CAND=""
-
-          if [[ -f "arch/arm64/configs/gki_defconfig" ]]; then
-            CAND="gki_defconfig"
-          elif [[ -f "arch/arm64/configs/vendor/gki_defconfig" ]]; then
-            CAND="vendor/gki_defconfig"
-          else
-            CAND="$(ls -1 arch/arm64/configs/* 2>/dev/null | grep -i vermeer | head -n 1 || true)"
-            if [[ -n "${CAND}" ]]; then
-              CAND="$(basename "${CAND}")"
-            fi
-          fi
-
-          if [[ -z "${CAND}" ]]; then
-            CAND="$(ls -1 arch/arm64/configs/*defconfig 2>/dev/null | head -n 1 || true)"
-            if [[ -n "${CAND}" ]]; then
-              CAND="$(basename "${CAND}")"
-            fi
-          fi
-
-          if [[ -z "${CAND}" ]]; then
-            echo "ERROR: No defconfig found. Listing arch/arm64/configs:"
-            ls -la arch/arm64/configs || true
-            exit 1
-          fi
-
-          echo "defconfig=${CAND}" >> "$GITHUB_OUTPUT"
-          echo "Selected (auto): ${CAND}"
-
-      - name: Build kernel (BTF-safe + SUSFS v2.0 enable)
-        working-directory: ${{ steps.kdir.outputs.KDIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          DEF="${{ steps.defc.outputs.defconfig }}"
-          echo "Using defconfig: ${DEF}"
-
-          mkdir -p out
-
-          # Configure
-          make O=out "${DEF}"
-
-          # --- BTF safety: disable BTF to avoid pahole/BTF CI failures ---
-          if [[ -x "scripts/config" ]]; then
-            ./scripts/config --file out/.config -d DEBUG_INFO_BTF || true
-            ./scripts/config --file out/.config -d DEBUG_INFO_BTF_MODULES || true
-          else
-            sed -i 's/^CONFIG_DEBUG_INFO_BTF=y/# CONFIG_DEBUG_INFO_BTF is not set/' out/.config || true
-            sed -i 's/^CONFIG_DEBUG_INFO_BTF_MODULES=y/# CONFIG_DEBUG_INFO_BTF_MODULES is not set/' out/.config || true
-          fi
-
-          # --- SUSFS v2.0: enable if symbols exist in this tree ---
-          # We do "best-effort": if your kernel tree doesn't include SUSFS, build still proceeds.
-          if [[ -x "scripts/config" ]]; then
-            # Common SUSFS symbols across forks (enable if present)
-            for sym in SUSFS KSU_SUSFS KSU_SUSFS_SUS_PATH SUSFS_SUS_PATH; do
-              if grep -qE "^(config|menuconfig)\s+${sym}\b" -R Kconfig* 2>/dev/null; then
-                echo "Enabling CONFIG_${sym}=y"
-                ./scripts/config --file out/.config -e "${sym}" || true
-              else
-                # Not found -> ignore
-                true
-              fi
-            done
-
-            # Optional SUSFS features (enable if present)
-            for sym in SUSFS_MAGIC_MOUNT SUSFS_OVERLAYFS SUSFS_KSTAT_HOOK SUSFS_PROC_HIDE SUSFS_SPOOF_UNAME SUSFS_SPOOF_CMDLINE; do
-              if grep -qE "^(config|menuconfig)\s+${sym}\b" -R Kconfig* 2>/dev/null; then
-                echo "Enabling optional CONFIG_${sym}=y"
-                ./scripts/config --file out/.config -e "${sym}" || true
-              fi
-            done
-          else
-            echo "scripts/config not found; SUSFS enablement skipped (best-effort)."
-          fi
-
-          # Normalize config after edits (IMPORTANT: no 'yes |' to avoid Broken pipe)
+          export PATH=$GITHUB_WORKSPACE/clang-aosp/bin:$PATH
+          export ARCH=arm64
+          
+          # Создаем конфиг из GKI дефконфига
+          make O=out vendor/gki_defconfig
+          
+          chmod +x scripts/config
+          
+          # --- ИМЯ ЯДРА ---
+          ./scripts/config --file out/.config --set-str LOCALVERSION "-GudzonKernel"
+          
+          # --- НАСТРОЙКИ СКРЫТИЯ (SUSFS) ---
+          ./scripts/config --file out/.config -e SUSFS
+          ./scripts/config --file out/.config -e KSU_SUSFS
+          ./scripts/config --file out/.config -e SUSFS_MAGIC_MOUNT
+          ./scripts/config --file out/.config -e SUSFS_SPOOF_UNAME
+          
+          # --- БЕЗОПАСНОСТЬ И СТАБИЛЬНОСТЬ ---
+          ./scripts/config --file out/.config -d MODULE_SIG
+          ./scripts/config --file out/.config -d DEBUG_INFO_BTF
+          ./scripts/config --file out/.config -d LTO_CLANG_FULL
+          ./scripts/config --file out/.config -e LTO_CLANG_THIN
+          
           make O=out olddefconfig
 
-          # Build
-          make -j"$(nproc)" O=out
-
-          echo "Boot outputs:"
-          ls -la out/arch/arm64/boot || true
-
-      - name: Collect artifacts (Image + AnyKernel3)
-        working-directory: ${{ steps.kdir.outputs.KDIR }}
-        shell: bash
+      - name: Compilation (GudzonKernel Build)
         run: |
-          set -euo pipefail
+          export PATH=$GITHUB_WORKSPACE/clang-aosp/bin:$PATH
+          make -j$(nproc --all) O=out \
+            ARCH=arm64 \
+            CC=clang \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            LLVM=1 LLVM_IAS=1 \
+            Image dtbo.img
 
-          BOOT="$PWD/out/arch/arm64/boot"
-          mkdir -p "$PWD/dist"
-
-          if [[ -f "$BOOT/Image" ]]; then
-            cp -v "$BOOT/Image" "$PWD/dist/Image${{ inputs.zip_suffix }}"
-          elif [[ -f "$BOOT/Image.gz" ]]; then
-            cp -v "$BOOT/Image.gz" "$PWD/dist/Image.gz${{ inputs.zip_suffix }}"
-            gzip -dc "$BOOT/Image.gz" > "$PWD/dist/Image${{ inputs.zip_suffix }}"
-          elif [[ -f "$BOOT/Image.lz4" ]]; then
-            cp -v "$BOOT/Image.lz4" "$PWD/dist/Image.lz4${{ inputs.zip_suffix }}"
-            lz4 -dc "$BOOT/Image.lz4" > "$PWD/dist/Image${{ inputs.zip_suffix }}"
-          else
-            echo "ERROR: No Image/Image.gz/Image.lz4 found in $BOOT"
-            ls -la "$BOOT" || true
-            exit 1
-          fi
-
-          # Export config for debugging
-          cp -v "$PWD/out/.config" "$PWD/dist/config${{ inputs.zip_suffix }}.txt" || true
-
-          if [[ -d "AnyKernel3" ]]; then
-            rm -rf AnyKernel3/.git || true
-            cp -v "$PWD/dist/Image${{ inputs.zip_suffix }}" AnyKernel3/Image
-            (cd AnyKernel3 && zip -r "../dist/AnyKernel3${{ inputs.zip_suffix }}.zip" .)
-          else
-            echo "AnyKernel3 folder not found — skipping AnyKernel3 zip."
-          fi
-
-      - name: ccache stats
-        shell: bash
+      - name: Package for Vermeer (AnyKernel3)
         run: |
-          ccache -s || true
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
+          cp out/arch/arm64/boot/Image AnyKernel3/
+          [ -f out/arch/arm64/boot/dtbo.img ] && cp out/arch/arm64/boot/dtbo.img AnyKernel3/
+          
+          cd AnyKernel3
+          # Настраиваем AnyKernel под наше имя
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          sed -i 's/block=auto/block=auto/g' anykernel.sh # На всякий случай
+          
+          zip -r9 "../GudzonKernel-Vermeer-A16-SukiSU.zip" *
 
-      - name: Upload artifacts
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-build${{ inputs.zip_suffix }}
-          path: |
-            ${{ steps.kdir.outputs.KDIR }}/dist/*
+          name: GudzonKernel-Package
+          path: ./*.zip
 
-      - name: Upload ccache debug logs (optional)
-        if: ${{ inputs.upload_ccache_debug }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: ccache-debug${{ inputs.zip_suffix }}
-          path: |
-            ~/.ccache/ccache.conf
-            ~/.ccache/ccache.log
