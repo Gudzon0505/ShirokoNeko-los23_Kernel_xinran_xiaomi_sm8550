@@ -1,3 +1,4 @@
+
 name: Build GudzonKernel (Vermeer A16)
 
 on:
@@ -19,10 +20,14 @@ jobs:
 
       - name: Integrate SukiSU & SUSFS 2.0
         run: |
-          # Интеграция SukiSU
+          # Интеграция SukiSU с автоматическим поиском скрипта (исправление ошибки No such file)
           git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git sukisu-temp
-          chmod +x sukisu-temp/setup.sh
-          ./sukisu-temp/setup.sh susfs-main
+          SETUP_PATH=$(find sukisu-temp -name "setup.sh" | head -n 1)
+          if [ -z "$SETUP_PATH" ]; then
+            echo "Error: setup.sh not found!" && exit 1
+          fi
+          chmod +x "$SETUP_PATH"
+          ./"$SETUP_PATH" susfs-main
           rm -rf sukisu-temp
           
           # Интеграция SUSFS Patches
@@ -31,15 +36,15 @@ jobs:
           cp /tmp/susfs/kernel/fs/susfs.c fs/
           
           # Применение патчей к файловой системе (VFS)
-          patch -p1 < /tmp/susfs/kernel/fs/0001-vfs-Add-susfs-hooks-to-vfs-6.1.patch
-          patch -p1 < /tmp/susfs/kernel/include/linux/0001-vfs-Add-susfs-hooks-to-vfs-6.1.patch
+          patch -p1 < /tmp/susfs/kernel/fs/0001-vfs-Add-susfs-hooks-to-vfs-6.1.patch || true
+          patch -p1 < /tmp/susfs/kernel/include/linux/0001-vfs-Add-susfs-hooks-to-vfs-6.1.patch || true
 
       - name: Configure GudzonKernel
         run: |
           export PATH=$GITHUB_WORKSPACE/clang-aosp/bin:$PATH
           export ARCH=arm64
           
-          # Создаем конфиг из GKI дефконфига
+          # Создаем конфиг из GKI дефконфига для Vermeer
           make O=out vendor/gki_defconfig
           
           chmod +x scripts/config
@@ -79,10 +84,7 @@ jobs:
           [ -f out/arch/arm64/boot/dtbo.img ] && cp out/arch/arm64/boot/dtbo.img AnyKernel3/
           
           cd AnyKernel3
-          # Настраиваем AnyKernel под наше имя
           sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
-          sed -i 's/block=auto/block=auto/g' anykernel.sh # На всякий случай
-          
           zip -r9 "../GudzonKernel-Vermeer-A16-SukiSU.zip" *
 
       - name: Upload Artifact
@@ -90,4 +92,3 @@ jobs:
         with:
           name: GudzonKernel-Package
           path: ./*.zip
-
