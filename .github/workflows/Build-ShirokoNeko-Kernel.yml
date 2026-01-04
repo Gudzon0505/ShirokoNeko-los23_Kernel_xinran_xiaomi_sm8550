@@ -8,19 +8,14 @@ on:
         required: true
         type: choice
         default: "ksu"
-        options:
-          - "ksu"
-          - "sukisu"
+        options: [ "ksu", "sukisu" ]
 
       sukisu_mode:
         description: "SukiSU mode (only if root_solution=sukisu)"
         required: true
         type: choice
         default: "susfs-main"
-        options:
-          - "main"
-          - "nongki"
-          - "susfs-main"
+        options: [ "main", "nongki", "susfs-main" ]
 
       defconfig:
         description: "Defconfig (leave empty for auto-detect)"
@@ -33,7 +28,7 @@ on:
         default: "-GudzonKernel"
 
       upload_ccache_debug:
-        description: "Upload ccache debug logs"
+        description: "Upload ccache debug logs (usually not needed)"
         required: true
         type: boolean
         default: false
@@ -41,16 +36,32 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360  # Дольше для тяжёлой сборки
+    timeout-minutes: 360
 
     env:
       ARCH: arm64
       SUBARCH: arm64
+
+      # GKI/LLVM build knobs
+      LLVM: "1"
+      LLVM_IAS: "1"
+
       CCACHE_COMPRESS: "true"
-      CCACHE_MAXSIZE: "10G"  # Больше кэша
-      CROSS_COMPILE: aarch64-linux-gnu-
-      CC: ccache clang
-      LD: ccache ld.lld
+      CCACHE_MAXSIZE: "5G"
+
+      # Toolchain (LLVM)
+      CC: "ccache clang"
+      LD: "ld.lld"
+      HOSTLD: "ld.lld"
+      AR: "llvm-ar"
+      NM: "llvm-nm"
+      OBJCOPY: "llvm-objcopy"
+      OBJDUMP: "llvm-objdump"
+      STRIP: "llvm-strip"
+
+      # Make builds more deterministic
+      KBUILD_BUILD_USER: "github-actions"
+      KBUILD_BUILD_HOST: "runner"
 
     steps:
       - name: Checkout
@@ -59,127 +70,223 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Install dependencies
+      - name: Detect kernel source directory
+        id: kdir
+        shell: bash
         run: |
-          set -eux
+          set -euo pipefail
+
+          if [[ -d "arch/arm64" && -d "drivers" && -f "Makefile" ]]; then
+            echo "KDIR=$PWD" >> "$GITHUB_OUTPUT"
+            echo "Kernel dir: $PWD"
+            exit 0
+          fi
+
+          if [[ -d "kernel/arch/arm64" && -d "kernel/drivers" && -f "kernel/Makefile" ]]; then
+            echo "KDIR=$PWD/kernel" >> "$GITHUB_OUTPUT"
+            echo "Kernel dir: $PWD/kernel"
+            exit 0
+          fi
+
+          echo "ERROR: cannot find kernel root."
+          echo "Expected: arch/arm64 + drivers + Makefile in repo root OR ./kernel"
+          echo "Repo root:"
+          ls -la
+          echo "kernel/ (if exists):"
+          ls -la kernel || true
+          exit 1
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y \
             git curl wget rsync zip unzip jq \
             build-essential bc bison flex make \
             libssl-dev libelf-dev zstd lz4 \
+            libncurses-dev \
             python3 python3-pip \
-            ccache clang lld llvm gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            ccache clang lld llvm \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            dwarves
+
+          echo "pahole version:"
+          pahole --version || true
+          echo "clang version:"
+          clang --version || true
+          echo "ld.lld:"
+          command -v ld.lld || true
 
       - name: Prepare ccache
+        shell: bash
         run: |
-          set -eux
-          ccache -M 10G
+          set -euo pipefail
+          ccache -M 5G
           ccache -z
-          ccache -s
+          ccache -s || true
 
       - name: Integrate KernelSU (if selected)
         if: ${{ inputs.root_solution == 'ksu' }}
+        working-directory: ${{ steps.kdir.outputs.KDIR }}
+        shell: bash
         run: |
-          set -eux
+          set -euo pipefail
           curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
 
       - name: Integrate SukiSU-Ultra (if selected)
         if: ${{ inputs.root_solution == 'sukisu' }}
+        working-directory: ${{ steps.kdir.outputs.KDIR }}
+        shell: bash
         run: |
-          set -eux
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "${{ inputs.sukisu_mode }}"
+          set -euo pipefail
 
-      - name: Disable KVM (экономия RAM, не нужен для телефона)
-        run: |
-          set -eux
-          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_KVM=y/# CONFIG_KVM is not set/' {} +
+          rm -rf /tmp/sukisu-ultra
+          git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/sukisu-ultra
 
-      - name: Select defconfig (auto-detect + fallback)
+          echo "Searching setup.sh in SukiSU-Ultra repo..."
+
+          # Prefer kernel/setup.sh first
+          if [[ -f "/tmp/sukisu-ultra/kernel/setup.sh" ]]; then
+            SETUP="/tmp/sukisu-ultra/kernel/setup.sh"
+          else
+            # Fallback: first setup.sh found
+            SETUP="$(find /tmp/sukisu-ultra -maxdepth 6 -type f -name 'setup.sh' | head -n 1 || true)"
+          fi
+
+          if [[ -z "${SETUP:-}" || ! -f "${SETUP}" ]]; then
+            echo "ERROR: setup.sh not found in SukiSU-Ultra repo"
+            find /tmp/sukisu-ultra -maxdepth 6 -type f | head -n 200
+            exit 1
+          fi
+
+          echo "Using setup script: ${SETUP}"
+          chmod +x "${SETUP}"
+          bash "${SETUP}" "${{ inputs.sukisu_mode }}"
+
+      - name: Select defconfig (auto if empty)
         id: defc
+        working-directory: ${{ steps.kdir.outputs.KDIR }}
+        shell: bash
         run: |
-          set -eux
+          set -euo pipefail
+
           DEF_IN="${{ inputs.defconfig }}"
-          if [ -n "$DEF_IN" ]; then
-            echo "defconfig=$DEF_IN" >> $GITHUB_OUTPUT
+          if [[ -n "${DEF_IN}" ]]; then
+            echo "defconfig=${DEF_IN}" >> "$GITHUB_OUTPUT"
+            echo "Selected (manual): ${DEF_IN}"
             exit 0
           fi
 
           echo "Auto-detect defconfig..."
-
           CAND=""
-          if [ -f "arch/arm64/configs/gki_defconfig" ]; then
+
+          if [[ -f "arch/arm64/configs/gki_defconfig" ]]; then
             CAND="gki_defconfig"
-          elif [ -f "arch/arm64/configs/vendor/gki_defconfig" ]; then
+          elif [[ -f "arch/arm64/configs/vendor/gki_defconfig" ]]; then
             CAND="vendor/gki_defconfig"
           else
             CAND="$(ls -1 arch/arm64/configs/* 2>/dev/null | grep -i vermeer | head -n 1 || true)"
-            if [ -n "$CAND" ]; then
+            if [[ -n "$CAND" ]]; then
               CAND="$(basename "$CAND")"
             fi
           fi
 
-          if [ -z "$CAND" ]; then
+          if [[ -z "$CAND" ]]; then
             CAND="$(ls -1 arch/arm64/configs/*defconfig 2>/dev/null | head -n 1 || true)"
-            if [ -n "$CAND" ]; then
+            if [[ -n "$CAND" ]]; then
               CAND="$(basename "$CAND")"
             fi
           fi
 
-          if [ -z "$CAND" ]; then
-            echo "ERROR: No defconfig found!"
+          if [[ -z "$CAND" ]]; then
+            echo "ERROR: No defconfig found. Listing arch/arm64/configs:"
             ls -la arch/arm64/configs || true
             exit 1
           fi
 
-          echo "defconfig=$CAND" >> $GITHUB_OUTPUT
+          echo "defconfig=$CAND" >> "$GITHUB_OUTPUT"
+          echo "Selected (auto): $CAND"
 
-      - name: Build kernel (low parallelism to avoid OOM)
+      - name: Build kernel (with BTF safety)
+        working-directory: ${{ steps.kdir.outputs.KDIR }}
+        shell: bash
         run: |
-          set -eux
+          set -euo pipefail
+
           DEF="${{ steps.defc.outputs.defconfig }}"
-          echo "Using defconfig: $DEF"
+          echo "Using defconfig: ${DEF}"
 
           mkdir -p out
-          export KBUILD_OUTPUT="$PWD/out"
 
-          make O=out "$DEF"
-          make -j8 O=out  # 8 потоков — стабильно на runner, без OOM
+          make O=out "${DEF}"
 
-          echo "Build finished."
+          # Disable BTF to avoid pahole/BTF failures across runners
+          if [[ -x "scripts/config" ]]; then
+            ./scripts/config --file out/.config -d DEBUG_INFO_BTF || true
+            ./scripts/config --file out/.config -d DEBUG_INFO_BTF_MODULES || true
+          else
+            sed -i 's/^CONFIG_DEBUG_INFO_BTF=y/# CONFIG_DEBUG_INFO_BTF is not set/' out/.config || true
+            sed -i 's/^CONFIG_DEBUG_INFO_BTF_MODULES=y/# CONFIG_DEBUG_INFO_BTF_MODULES is not set/' out/.config || true
+          fi
+
+          yes "" | make O=out olddefconfig
+
+          make -j"$(nproc)" O=out
+
+          echo "Boot outputs:"
           ls -la out/arch/arm64/boot || true
 
-      - name: Pack AnyKernel3 (if present)
+      - name: Collect artifacts (Image + AnyKernel3)
+        working-directory: ${{ steps.kdir.outputs.KDIR }}
+        shell: bash
         run: |
-          set -eux
-          OUT="$PWD/out/arch/arm64/boot"
-          if [ ! -f "$OUT/Image" ]; then
-            echo "ERROR: Image not found!"
+          set -euo pipefail
+
+          BOOT="$PWD/out/arch/arm64/boot"
+          mkdir -p "$PWD/dist"
+
+          if [[ -f "$BOOT/Image" ]]; then
+            cp -v "$BOOT/Image" "$PWD/dist/Image${{ inputs.zip_suffix }}"
+          elif [[ -f "$BOOT/Image.gz" ]]; then
+            cp -v "$BOOT/Image.gz" "$PWD/dist/Image.gz${{ inputs.zip_suffix }}"
+            gzip -dc "$BOOT/Image.gz" > "$PWD/dist/Image${{ inputs.zip_suffix }}"
+          elif [[ -f "$BOOT/Image.lz4" ]]; then
+            cp -v "$BOOT/Image.lz4" "$PWD/dist/Image.lz4${{ inputs.zip_suffix }}"
+            lz4 -dc "$BOOT/Image.lz4" > "$PWD/dist/Image${{ inputs.zip_suffix }}"
+          else
+            echo "ERROR: No Image/Image.gz/Image.lz4 found in $BOOT"
+            ls -la "$BOOT" || true
             exit 1
           fi
 
-          mkdir -p dist
-          cp -v "\( OUT/Image" "dist/Image \){{ inputs.zip_suffix }}"
+          cp -v "$PWD/out/.config" "$PWD/dist/config${{ inputs.zip_suffix }}.txt" || true
 
-          if [ -d "AnyKernel3" ]; then
+          if [[ -d "AnyKernel3" ]]; then
             rm -rf AnyKernel3/.git || true
-            cp -v "$OUT/Image" AnyKernel3/Image
+            cp -v "$PWD/dist/Image${{ inputs.zip_suffix }}" AnyKernel3/Image
             (cd AnyKernel3 && zip -r "../dist/AnyKernel3${{ inputs.zip_suffix }}.zip" .)
           else
-            echo "AnyKernel3 not found — only Image uploaded."
+            echo "AnyKernel3 folder not found — skipping AnyKernel3 zip."
           fi
 
       - name: ccache stats
-        run: ccache -s || true
+        shell: bash
+        run: |
+          ccache -s || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: kernel-build${{ inputs.zip_suffix }}
-          path: dist/*
+          path: |
+            ${{ steps.kdir.outputs.KDIR }}/dist/*
 
-      - name: Upload ccache debug (optional)
+      - name: Upload ccache debug logs (optional)
         if: ${{ inputs.upload_ccache_debug }}
         uses: actions/upload-artifact@v4
         with:
           name: ccache-debug${{ inputs.zip_suffix }}
-          path: ~/.ccache/
+          path: |
+            ~/.ccache/ccache.conf
+            ~/.ccache/ccache.log
