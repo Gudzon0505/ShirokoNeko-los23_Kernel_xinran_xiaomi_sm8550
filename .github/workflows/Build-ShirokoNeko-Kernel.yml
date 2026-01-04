@@ -28,12 +28,12 @@ on:
         default: ""
 
       zip_suffix:
-        description: "ZIP suffix"
+        description: "ZIP suffix (example: -GudzonKernel)"
         required: false
         default: "-GudzonKernel"
 
       upload_ccache_debug:
-        description: "Upload ccache debug"
+        description: "Upload ccache debug logs"
         required: true
         type: boolean
         default: false
@@ -41,13 +41,13 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360  # Extended for heavy build
+    timeout-minutes: 360  # Дольше для тяжёлой сборки
 
     env:
       ARCH: arm64
       SUBARCH: arm64
       CCACHE_COMPRESS: "true"
-      CCACHE_MAXSIZE: "10G"  # Increased
+      CCACHE_MAXSIZE: "10G"  # Больше кэша
       CROSS_COMPILE: aarch64-linux-gnu-
       CC: ccache clang
       LD: ccache ld.lld
@@ -89,18 +89,51 @@ jobs:
           set -eux
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "${{ inputs.sukisu_mode }}"
 
-      - name: Disable KVM (fix OOM)
+      - name: Disable KVM (экономия RAM, не нужен для телефона)
         run: |
           set -eux
-          sed -i 's/CONFIG_KVM=y/# CONFIG_KVM is not set/' arch/arm64/configs/*defconfig || true
+          find arch/arm64/configs -type f -exec sed -i 's/^CONFIG_KVM=y/# CONFIG_KVM is not set/' {} +
 
-      - name: Select defconfig
+      - name: Select defconfig (auto-detect + fallback)
         id: defc
         run: |
           set -eux
-          # (твой оригинальный код auto-detect, оставляем)
+          DEF_IN="${{ inputs.defconfig }}"
+          if [ -n "$DEF_IN" ]; then
+            echo "defconfig=$DEF_IN" >> $GITHUB_OUTPUT
+            exit 0
+          fi
 
-      - name: Build kernel (lower parallelism to avoid OOM)
+          echo "Auto-detect defconfig..."
+
+          CAND=""
+          if [ -f "arch/arm64/configs/gki_defconfig" ]; then
+            CAND="gki_defconfig"
+          elif [ -f "arch/arm64/configs/vendor/gki_defconfig" ]; then
+            CAND="vendor/gki_defconfig"
+          else
+            CAND="$(ls -1 arch/arm64/configs/* 2>/dev/null | grep -i vermeer | head -n 1 || true)"
+            if [ -n "$CAND" ]; then
+              CAND="$(basename "$CAND")"
+            fi
+          fi
+
+          if [ -z "$CAND" ]; then
+            CAND="$(ls -1 arch/arm64/configs/*defconfig 2>/dev/null | head -n 1 || true)"
+            if [ -n "$CAND" ]; then
+              CAND="$(basename "$CAND")"
+            fi
+          fi
+
+          if [ -z "$CAND" ]; then
+            echo "ERROR: No defconfig found!"
+            ls -la arch/arm64/configs || true
+            exit 1
+          fi
+
+          echo "defconfig=$CAND" >> $GITHUB_OUTPUT
+
+      - name: Build kernel (low parallelism to avoid OOM)
         run: |
           set -eux
           DEF="${{ steps.defc.outputs.defconfig }}"
@@ -110,17 +143,33 @@ jobs:
           export KBUILD_OUTPUT="$PWD/out"
 
           make O=out "$DEF"
-          make -j8 O=out  # Reduced from $(nproc) to 8 — stable on runner
+          make -j8 O=out  # 8 потоков — стабильно на runner, без OOM
 
           echo "Build finished."
           ls -la out/arch/arm64/boot || true
 
-      - name: Pack AnyKernel3
+      - name: Pack AnyKernel3 (if present)
         run: |
-          # (твой оригинальный код, но with -j8 fix)
+          set -eux
+          OUT="$PWD/out/arch/arm64/boot"
+          if [ ! -f "$OUT/Image" ]; then
+            echo "ERROR: Image not found!"
+            exit 1
+          fi
+
+          mkdir -p dist
+          cp -v "\( OUT/Image" "dist/Image \){{ inputs.zip_suffix }}"
+
+          if [ -d "AnyKernel3" ]; then
+            rm -rf AnyKernel3/.git || true
+            cp -v "$OUT/Image" AnyKernel3/Image
+            (cd AnyKernel3 && zip -r "../dist/AnyKernel3${{ inputs.zip_suffix }}.zip" .)
+          else
+            echo "AnyKernel3 not found — only Image uploaded."
+          fi
 
       - name: ccache stats
-        run: ccache -s
+        run: ccache -s || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -132,5 +181,5 @@ jobs:
         if: ${{ inputs.upload_ccache_debug }}
         uses: actions/upload-artifact@v4
         with:
-          name: ccache-debug
+          name: ccache-debug${{ inputs.zip_suffix }}
           path: ~/.ccache/
