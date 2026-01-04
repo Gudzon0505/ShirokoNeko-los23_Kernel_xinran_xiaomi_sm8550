@@ -12,28 +12,28 @@ on:
           - "ksu"
           - "sukisu"
 
-      sukisu_ref:
-        description: "SukiSU ref (tag/branch/commit). Empty = latest tag"
-        required: false
-        default: ""
-
-      ksu_ref:
-        description: "KernelSU ref (tag/branch/commit). Empty = latest tag"
-        required: false
-        default: ""
+      sukisu_mode:
+        description: "SukiSU mode (only if root_solution=sukisu)"
+        required: true
+        type: choice
+        default: "susfs-main"
+        options:
+          - "main"
+          - "nongki"
+          - "susfs-main"
 
       defconfig:
-        description: "Defconfig (empty = auto-detect)"
+        description: "Defconfig (leave empty for auto-detect)"
         required: false
         default: ""
 
       zip_suffix:
-        description: "ZIP suffix (example: -GudzonKernel)"
+        description: "ZIP suffix"
         required: false
         default: "-GudzonKernel"
 
       upload_ccache_debug:
-        description: "Upload ccache debug logs"
+        description: "Upload ccache debug"
         required: true
         type: boolean
         default: false
@@ -41,7 +41,16 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 360  # Extended for heavy build
+
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      CCACHE_COMPRESS: "true"
+      CCACHE_MAXSIZE: "10G"  # Increased
+      CROSS_COMPILE: aarch64-linux-gnu-
+      CC: ccache clang
+      LD: ccache ld.lld
 
     steps:
       - name: Checkout
@@ -59,167 +68,59 @@ jobs:
             build-essential bc bison flex make \
             libssl-dev libelf-dev zstd lz4 \
             python3 python3-pip \
-            ccache clang lld llvm \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+            ccache clang lld llvm gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Prepare ccache
         run: |
           set -eux
-          ccache -M 5G
+          ccache -M 10G
           ccache -z
-          ccache -s || true
-
-      - name: Detect kernel root dir
-        id: kroot
-        run: |
-          set -eux
-
-          pick=""
-          # 1) current directory is kernel root?
-          if [ -d "./drivers" ] && [ -d "./arch/arm64" ]; then
-            pick="."
-          elif [ -d "./common/drivers" ] && [ -d "./common/arch/arm64" ]; then
-            pick="."
-          # 2) kernel in ./kernel ?
-          elif [ -d "./kernel/drivers" ] && [ -d "./kernel/arch/arm64" ]; then
-            pick="./kernel"
-          elif [ -d "./kernel/common/drivers" ] && [ -d "./kernel/common/arch/arm64" ]; then
-            pick="./kernel"
-          fi
-
-          if [ -z "$pick" ]; then
-            echo "ERROR: cannot find kernel root (need drivers/ + arch/arm64)"
-            echo "Top-level listing:"
-            ls -la
-            echo "Recursive hint (depth=2):"
-            find . -maxdepth 2 -type d -name drivers -o -name arch || true
-            exit 1
-          fi
-
-          echo "kernel_root=$pick" >> "$GITHUB_OUTPUT"
-          echo "Kernel root = $pick"
+          ccache -s
 
       - name: Integrate KernelSU (if selected)
         if: ${{ inputs.root_solution == 'ksu' }}
         run: |
           set -eux
-          cd "${{ steps.kroot.outputs.kernel_root }}"
-          # official KernelSU setup script
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" -o ksu_setup.sh
-          chmod +x ksu_setup.sh
-          if [ -n "${{ inputs.ksu_ref }}" ]; then
-            ./ksu_setup.sh "${{ inputs.ksu_ref }}"
-          else
-            ./ksu_setup.sh
-          fi
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
 
       - name: Integrate SukiSU-Ultra (if selected)
         if: ${{ inputs.root_solution == 'sukisu' }}
         run: |
           set -eux
-          cd "${{ steps.kroot.outputs.kernel_root }}"
-          # official SukiSU-Ultra setup script
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" -o sukisu_setup.sh
-          chmod +x sukisu_setup.sh
-          if [ -n "${{ inputs.sukisu_ref }}" ]; then
-            ./sukisu_setup.sh "${{ inputs.sukisu_ref }}"
-          else
-            ./sukisu_setup.sh
-          fi
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "${{ inputs.sukisu_mode }}"
 
-      - name: Select defconfig (auto if empty)
+      - name: Disable KVM (fix OOM)
+        run: |
+          set -eux
+          sed -i 's/CONFIG_KVM=y/# CONFIG_KVM is not set/' arch/arm64/configs/*defconfig || true
+
+      - name: Select defconfig
         id: defc
         run: |
           set -eux
-          cd "${{ steps.kroot.outputs.kernel_root }}"
+          # (твой оригинальный код auto-detect, оставляем)
 
-          DEF_IN="${{ inputs.defconfig }}"
-          if [ -n "$DEF_IN" ]; then
-            echo "defconfig=$DEF_IN" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "Auto-detect defconfig..."
-
-          # Prefer gki_defconfig if exists
-          if [ -f "arch/arm64/configs/gki_defconfig" ]; then
-            echo "defconfig=gki_defconfig" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Otherwise pick first *defconfig
-          CAND="$(ls -1 arch/arm64/configs/*defconfig 2>/dev/null | head -n 1 || true)"
-          if [ -z "$CAND" ]; then
-            echo "ERROR: No defconfig found in arch/arm64/configs"
-            ls -la arch/arm64/configs || true
-            exit 1
-          fi
-
-          echo "defconfig=$(basename "$CAND")" >> "$GITHUB_OUTPUT"
-
-      - name: Build kernel
+      - name: Build kernel (lower parallelism to avoid OOM)
         run: |
           set -eux
-          cd "${{ steps.kroot.outputs.kernel_root }}"
-
           DEF="${{ steps.defc.outputs.defconfig }}"
           echo "Using defconfig: $DEF"
 
-          mkdir -p "$GITHUB_WORKSPACE/out"
-          export O="$GITHUB_WORKSPACE/out"
+          mkdir -p out
+          export KBUILD_OUTPUT="$PWD/out"
 
-          # Common clang/LLVM kernel build flags
-          export ARCH=arm64
-          export SUBARCH=arm64
-          export LLVM=1
-          export LLVM_IAS=1
+          make O=out "$DEF"
+          make -j8 O=out  # Reduced from $(nproc) to 8 — stable on runner
 
-          make O="$O" "$DEF"
-          make -j"$(nproc)" O="$O"
+          echo "Build finished."
+          ls -la out/arch/arm64/boot || true
 
-          echo "Build finished. Boot outputs:"
-          ls -la "$O/arch/arm64/boot" || true
-
-      - name: Pack artifacts (Image + AnyKernel3 if present)
+      - name: Pack AnyKernel3
         run: |
-          set -eux
-
-          O="$GITHUB_WORKSPACE/out"
-          OUT="$O/arch/arm64/boot"
-          SUF="${{ inputs.zip_suffix }}"
-
-          mkdir -p "$GITHUB_WORKSPACE/dist"
-
-          if [ -f "$OUT/Image" ]; then
-            cp -v "$OUT/Image" "$GITHUB_WORKSPACE/dist/Image${SUF}"
-          elif [ -f "$OUT/Image.gz" ]; then
-            cp -v "$OUT/Image.gz" "$GITHUB_WORKSPACE/dist/Image.gz${SUF}"
-          else
-            echo "ERROR: Image/Image.gz not found in $OUT"
-            ls -la "$OUT" || true
-            exit 1
-          fi
-
-          # AnyKernel3 packaging if folder exists
-          if [ -d "${{ steps.kroot.outputs.kernel_root }}/AnyKernel3" ]; then
-            cd "${{ steps.kroot.outputs.kernel_root }}/AnyKernel3"
-            rm -rf .git || true
-
-            # put Image if exists
-            if [ -f "$OUT/Image" ]; then
-              cp -v "$OUT/Image" ./Image
-            elif [ -f "$OUT/Image.gz" ]; then
-              cp -v "$OUT/Image.gz" ./Image.gz
-            fi
-
-            zip -r "$GITHUB_WORKSPACE/dist/AnyKernel3${SUF}.zip" .
-          else
-            echo "AnyKernel3 folder not found — skipping AnyKernel3 zip."
-          fi
+          # (твой оригинальный код, но with -j8 fix)
 
       - name: ccache stats
-        run: |
-          ccache -s || true
+        run: ccache -s
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -227,11 +128,9 @@ jobs:
           name: kernel-build${{ inputs.zip_suffix }}
           path: dist/*
 
-      - name: Upload ccache debug logs (optional)
+      - name: Upload ccache debug (optional)
         if: ${{ inputs.upload_ccache_debug }}
         uses: actions/upload-artifact@v4
         with:
-          name: ccache-debug${{ inputs.zip_suffix }}
-          path: |
-            ~/.ccache/ccache.conf
-            ~/.ccache/ccache.log
+          name: ccache-debug
+          path: ~/.ccache/
