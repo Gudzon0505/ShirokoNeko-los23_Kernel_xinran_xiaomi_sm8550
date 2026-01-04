@@ -1,5 +1,5 @@
-#ifndef __KSU_H_KSU_CORE
-#define __KSU_H_KSU_CORE
+#ifndef __KSU_H_KSU_SETUID_HOOK
+#define __KSU_H_KSU_SETUID_HOOK
 
 #include <linux/init.h>
 #include <linux/types.h>
@@ -7,7 +7,8 @@
 void ksu_setuid_hook_init(void);
 void ksu_setuid_hook_exit(void);
 
-// Handler functions for hook_manager
-int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
+#ifndef CONFIG_KSU_SUSFS
+int ksu_handle_setuid_common(uid_t new_uid, uid_t old_uid, uid_t new_euid);
+#endif
 
 #endif
