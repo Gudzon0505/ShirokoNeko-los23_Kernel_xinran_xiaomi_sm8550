@@ -1,1 +1,108 @@
-name: Build GudzonKernel
+name: Build vermeer kernel (GKI, Lineage 23, SukiSU)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - lineage-23.0
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install deps
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison flex build-essential \
+            clang lld llvm \
+            libssl-dev libelf-dev \
+            dwarves \
+            python3 python3-pip \
+            rsync git zip unzip \
+            ccache curl jq
+          which clang
+          which ld.lld
+
+      # Интеграция SukiSU-Ultra (рекомендуемая ветка susfs-main)
+      - name: Integrate SukiSU-Ultra (susfs-main)
+        run: |
+          set -eux
+          # ВАЖНО: интеграцию делаем в исходниках ДО конфигов
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s susfs-main
+
+      - name: Configure kernel (GKI + vermeer + SukiSU)
+        run: |
+          set -eux
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+
+          SRC="$GITHUB_WORKSPACE"
+          OUT="$RUNNER_TEMP/out"
+
+          # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ:
+          # ошибка "source tree is not clean" возникает из-за мусора/генерённых файлов в SRC.
+          # Поэтому чистим именно SRC без O=.
+          make -C "$SRC" mrproper
+
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          # Базовый GKI конфиг -> OUT/.config
+          make -C "$SRC" O="$OUT" gki_defconfig
+
+          # Мержим ваш девайсный фрагмент
+          "$SRC/scripts/kconfig/merge_config.sh" -m -r \
+            "$OUT/.config" "$SRC/arch/arm64/configs/vendor/vermeer_GKI.config"
+
+          # Обязательные флаги для SukiSU/KPM (по докам SukiSU KPM обязателен)
+          # Если каких-то символов нет в дереве — scripts/config упадёт, поэтому делаем мягко:
+          if [ -x "$SRC/scripts/config" ]; then
+            "$SRC/scripts/config" --file "$OUT/.config" -e KPM || true
+            "$SRC/scripts/config" --file "$OUT/.config" -e KALLSYMS -e KALLSYMS_ALL || true
+            "$SRC/scripts/config" --file "$OUT/.config" -e KSU || true
+          fi
+
+          make -C "$SRC" O="$OUT" olddefconfig
+
+          # Быстрая проверка: попали ли опции
+          grep -E "CONFIG_KSU|CONFIG_KPM|CONFIG_LOCALVERSION|CONFIG_LTO|CONFIG_CFI" "$OUT/.config" || true
+
+      - name: Build
+        run: |
+          set -eux
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+
+          SRC="$GITHUB_WORKSPACE"
+          OUT="$RUNNER_TEMP/out"
+
+          make -C "$SRC" -j"$(nproc)" O="$OUT" Image Image.gz
+
+          if make -n -C "$SRC" O="$OUT" dtbo.img >/dev/null 2>&1; then
+            make -C "$SRC" -j"$(nproc)" O="$OUT" dtbo.img
+          fi
+
+          mkdir -p artifacts
+          cp -v "$OUT/arch/arm64/boot/Image" artifacts/ || true
+          cp -v "$OUT/arch/arm64/boot/Image.gz" artifacts/ || true
+          cp -v "$OUT/arch/arm64/boot/dtbo.img" artifacts/ || true
+          cp -v "$OUT/.config" artifacts/config || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GudzonKernel-vermeer-${{ github.sha }}
+          path: artifacts/*
