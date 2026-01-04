@@ -1,4 +1,4 @@
-name: Build vermeer kernel (GKI, Lineage 23, KSU/SukiSU)
+name: Build vermeer kernel (GKI, Lineage 23, KSU/SukiSU, SUSFS v2.0)
 
 on:
   workflow_dispatch:
@@ -42,26 +42,22 @@ jobs:
       ARCH: arm64
       SUBARCH: arm64
 
-      # GKI/LLVM build knobs
+      # Clang/LLVM build knobs commonly required by GKI trees
       LLVM: "1"
       LLVM_IAS: "1"
 
+      # ccache
       CCACHE_COMPRESS: "true"
       CCACHE_MAXSIZE: "5G"
 
-      # Toolchain (LLVM)
+      # Toolchain
       CC: "ccache clang"
       LD: "ld.lld"
-      HOSTLD: "ld.lld"
       AR: "llvm-ar"
       NM: "llvm-nm"
       OBJCOPY: "llvm-objcopy"
       OBJDUMP: "llvm-objdump"
       STRIP: "llvm-strip"
-
-      # Make builds more deterministic
-      KBUILD_BUILD_USER: "github-actions"
-      KBUILD_BUILD_HOST: "runner"
 
     steps:
       - name: Checkout
@@ -105,7 +101,6 @@ jobs:
             git curl wget rsync zip unzip jq \
             build-essential bc bison flex make \
             libssl-dev libelf-dev zstd lz4 \
-            libncurses-dev \
             python3 python3-pip \
             ccache clang lld llvm \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
@@ -115,8 +110,6 @@ jobs:
           pahole --version || true
           echo "clang version:"
           clang --version || true
-          echo "ld.lld:"
-          command -v ld.lld || true
 
       - name: Prepare ccache
         shell: bash
@@ -145,16 +138,8 @@ jobs:
           git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git /tmp/sukisu-ultra
 
           echo "Searching setup.sh in SukiSU-Ultra repo..."
-
-          # Prefer kernel/setup.sh first
-          if [[ -f "/tmp/sukisu-ultra/kernel/setup.sh" ]]; then
-            SETUP="/tmp/sukisu-ultra/kernel/setup.sh"
-          else
-            # Fallback: first setup.sh found
-            SETUP="$(find /tmp/sukisu-ultra -maxdepth 6 -type f -name 'setup.sh' | head -n 1 || true)"
-          fi
-
-          if [[ -z "${SETUP:-}" || ! -f "${SETUP}" ]]; then
+          SETUP="$(find /tmp/sukisu-ultra -maxdepth 6 -type f -name 'setup.sh' | head -n 1 || true)"
+          if [[ -z "${SETUP}" ]]; then
             echo "ERROR: setup.sh not found in SukiSU-Ultra repo"
             find /tmp/sukisu-ultra -maxdepth 6 -type f | head -n 200
             exit 1
@@ -187,28 +172,28 @@ jobs:
             CAND="vendor/gki_defconfig"
           else
             CAND="$(ls -1 arch/arm64/configs/* 2>/dev/null | grep -i vermeer | head -n 1 || true)"
-            if [[ -n "$CAND" ]]; then
-              CAND="$(basename "$CAND")"
+            if [[ -n "${CAND}" ]]; then
+              CAND="$(basename "${CAND}")"
             fi
           fi
 
-          if [[ -z "$CAND" ]]; then
+          if [[ -z "${CAND}" ]]; then
             CAND="$(ls -1 arch/arm64/configs/*defconfig 2>/dev/null | head -n 1 || true)"
-            if [[ -n "$CAND" ]]; then
-              CAND="$(basename "$CAND")"
+            if [[ -n "${CAND}" ]]; then
+              CAND="$(basename "${CAND}")"
             fi
           fi
 
-          if [[ -z "$CAND" ]]; then
+          if [[ -z "${CAND}" ]]; then
             echo "ERROR: No defconfig found. Listing arch/arm64/configs:"
             ls -la arch/arm64/configs || true
             exit 1
           fi
 
-          echo "defconfig=$CAND" >> "$GITHUB_OUTPUT"
-          echo "Selected (auto): $CAND"
+          echo "defconfig=${CAND}" >> "$GITHUB_OUTPUT"
+          echo "Selected (auto): ${CAND}"
 
-      - name: Build kernel (with BTF safety)
+      - name: Build kernel (BTF-safe + SUSFS v2.0 enable)
         working-directory: ${{ steps.kdir.outputs.KDIR }}
         shell: bash
         run: |
@@ -219,9 +204,10 @@ jobs:
 
           mkdir -p out
 
+          # Configure
           make O=out "${DEF}"
 
-          # Disable BTF to avoid pahole/BTF failures across runners
+          # --- BTF safety: disable BTF to avoid pahole/BTF CI failures ---
           if [[ -x "scripts/config" ]]; then
             ./scripts/config --file out/.config -d DEBUG_INFO_BTF || true
             ./scripts/config --file out/.config -d DEBUG_INFO_BTF_MODULES || true
@@ -230,8 +216,35 @@ jobs:
             sed -i 's/^CONFIG_DEBUG_INFO_BTF_MODULES=y/# CONFIG_DEBUG_INFO_BTF_MODULES is not set/' out/.config || true
           fi
 
-          yes "" | make O=out olddefconfig
+          # --- SUSFS v2.0: enable if symbols exist in this tree ---
+          # We do "best-effort": if your kernel tree doesn't include SUSFS, build still proceeds.
+          if [[ -x "scripts/config" ]]; then
+            # Common SUSFS symbols across forks (enable if present)
+            for sym in SUSFS KSU_SUSFS KSU_SUSFS_SUS_PATH SUSFS_SUS_PATH; do
+              if grep -qE "^(config|menuconfig)\s+${sym}\b" -R Kconfig* 2>/dev/null; then
+                echo "Enabling CONFIG_${sym}=y"
+                ./scripts/config --file out/.config -e "${sym}" || true
+              else
+                # Not found -> ignore
+                true
+              fi
+            done
 
+            # Optional SUSFS features (enable if present)
+            for sym in SUSFS_MAGIC_MOUNT SUSFS_OVERLAYFS SUSFS_KSTAT_HOOK SUSFS_PROC_HIDE SUSFS_SPOOF_UNAME SUSFS_SPOOF_CMDLINE; do
+              if grep -qE "^(config|menuconfig)\s+${sym}\b" -R Kconfig* 2>/dev/null; then
+                echo "Enabling optional CONFIG_${sym}=y"
+                ./scripts/config --file out/.config -e "${sym}" || true
+              fi
+            done
+          else
+            echo "scripts/config not found; SUSFS enablement skipped (best-effort)."
+          fi
+
+          # Normalize config after edits (IMPORTANT: no 'yes |' to avoid Broken pipe)
+          make O=out olddefconfig
+
+          # Build
           make -j"$(nproc)" O=out
 
           echo "Boot outputs:"
@@ -260,6 +273,7 @@ jobs:
             exit 1
           fi
 
+          # Export config for debugging
           cp -v "$PWD/out/.config" "$PWD/dist/config${{ inputs.zip_suffix }}.txt" || true
 
           if [[ -d "AnyKernel3" ]]; then
