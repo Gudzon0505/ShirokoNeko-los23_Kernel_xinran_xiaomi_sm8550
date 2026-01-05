@@ -20,28 +20,36 @@ jobs:
           gperf libelf-dev libssl-dev openjdk-11-jdk python3 python-is-python3 \
           zip expect libncurses-dev wget curl rsync lld llvm clang
 
-      - name: Build with Local Kleaf Tools
+      - name: Install Bazel
         run: |
-          # 1. Даем права на выполнение встроенным инструментам
-          chmod +x tools/bazel
+          curl -fPsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor > bazel-archive-keyring.gpg
+          sudo mv bazel-archive-keyring.gpg /usr/share/keyrings/bazel-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/bazel-archive-keyring.gpg] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
+          sudo apt-get update && sudo apt-get install -y bazel
+
+      - name: Build with Kleaf Professional
+        run: |
+          # 1. Обеспечиваем наличие WORKSPACE в корне
+          if [ ! -f WORKSPACE ]; then touch WORKSPACE; fi
           
-          # 2. Запускаем сборку через локальный bazel. 
-          # Мы используем прямой путь к цели kalama_dist в корне
-          ./tools/bazel build //:kalama_dist
+          # 2. Собираем ядро напрямую через системный Bazel.
+          # Убираем --config=fast, так как он не определен в вашем дереве
+          # Используем таргет kalama_dist из корня
+          bazel build //:kalama_dist
 
       - name: Package AnyKernel3
         run: |
           mkdir -p output
           
-          # Поиск собранного ядра Image и DTBO в выводе bazel-bin
+          # Поиск собранного ядра Image и DTBO в иерархии bazel-bin
           find bazel-bin -name "Image" -exec cp {} output/ \;
           find bazel-bin -name "dtbo.img" -exec cp {} output/ \; || echo "DTBO не найден"
           
-          # Использование твоего модифицированного AnyKernel3 для Poco F6 Pro
+          # Копируем AnyKernel3, модифицированный под Poco F6 Pro
           if [ -d "AnyKernel3" ]; then
             cp -r AnyKernel3/* output/
           else
-            echo "Ошибка: AnyKernel3 не найден!"
+            echo "Ошибка: AnyKernel3 не найден в репозитории!"
             exit 1
           fi
           
@@ -49,7 +57,7 @@ jobs:
           rm -rf .git*
           zip -r9 ../ShiroNeko-Vermeer-A16-KSU-SUSFS.zip *
 
-      - name: Upload Kernel
+      - name: Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ShiroNeko-Vermeer-Kernel
