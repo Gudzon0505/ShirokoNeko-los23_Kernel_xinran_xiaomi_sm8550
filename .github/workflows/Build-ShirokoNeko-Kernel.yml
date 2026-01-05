@@ -28,13 +28,11 @@ jobs:
           export ARCH=arm64
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           make O=out Xinran_PocoF6Pro_defconfig
-          
-          # ГАРАНТИРОВАННОЕ ВКЛЮЧЕНИЕ КЕРНЕЛСУ В ЯДРО
+          # Включение KernelSU и SUSFS непосредственно в ядро
           scripts/config --file out/.config --enable CONFIG_KSU
           scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
           scripts/config --file out/.config --enable CONFIG_SUSFS
           scripts/config --file out/.config --disable CONFIG_DEBUG_INFO_BTF
-          
           make O=out olddefconfig
           make -j$(nproc --all) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
 
@@ -42,30 +40,29 @@ jobs:
         run: |
           mkdir -p output/tools
           cd output
-          
-          # РАБОЧАЯ ССЫЛКА НА MAGISKBOOT (Устранение ошибки 404)
-          wget https://github.com/Tst-S/magiskboot_ndk/raw/main/bin/aarch64/magiskboot -O tools/magiskboot
+          # РАБОЧАЯ ССЫЛКА НА MAGISKBOOT (Исправляет ошибку 404)
+          wget https://github.com/osm0sis/bootctrl/raw/master/binaries/magiskboot -O tools/magiskboot
           chmod +x tools/magiskboot
           
-          # Загрузка базы LineageOS 23.0 (Android 16)
+          # Базовые образы LineageOS для Poco F6 Pro
           BASE_URL="https://mirrorbits.lineageos.org/full/vermeer/20260103"
           wget $BASE_URL/boot.img
           wget $BASE_URL/dtbo.img
           wget $BASE_URL/vendor_boot.img
           wget $BASE_URL/init_boot.img
           
-          # ПЕРЕПАКОВКА: вставляем наше ядро с рутом в оригинальный boot.img
+          # Перепаковка boot.img: вставляем наше ядро с рутом
           ./tools/magiskboot unpack boot.img
           cp ../out/arch/arm64/boot/Image kernel
           ./tools/magiskboot repack boot.img new-boot.img
           mv new-boot.img boot.img
           
-          # ФИКС СТРУКТУРЫ ANYKERNEL3 (Исправление ошибки utils.sh)
+          # Исправление структуры AnyKernel3 (убираем зависимость от utils.sh)
           if [ -d "../AnyKernel3" ]; then cp -r ../AnyKernel3/* .; fi
           mkdir -p META-INF/com/google/android
           
-          # СОЗДАЕМ АВТОНОМНЫЙ СКРИПТ (Прямая прошивка без лишних проверок)
           cat <<'EOF' > anykernel.sh
+          # AnyKernel3 for Vermeer
           properties() { '
           kernel.string=ShiroNeko Kernel Vermeer (KSU Inside)
           do.devicecheck=1
@@ -73,14 +70,14 @@ jobs:
           '; }
           block=auto;
           is_slot_device=1;
-          ui_print "Flashing all partitions...";
+          ui_print "Flashing partitions with Root integration...";
           EOF
 
-          zip -r9 ../ShiroNeko-Vermeer-Perfect.zip *
+          zip -r9 ../ShiroNeko-Vermeer-Final.zip *
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ShiroNeko-Ultimate-Package
-          path: ShiroNeko-Vermeer-Perfect.zip
+          path: ShiroNeko-Vermeer-Final.zip
 
