@@ -1,4 +1,4 @@
-name: Build ShiroNeko Vermeer PRO
+name: ShiroNeko Vermeer Final PRO
 on:
   workflow_dispatch:
 
@@ -12,7 +12,7 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 1
 
-      - name: Install Build Environment
+      - name: Build Kernel with Root
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 zip wget rsync lld-15 clang-15 dwarves
@@ -20,30 +20,22 @@ jobs:
           for tool in clang ld.lld llvm-nm llvm-ar llvm-objcopy llvm-objdump llvm-strip llvm-readelf llvm-size; do
             ln -sf /usr/bin/${tool}-15 $GITHUB_WORKSPACE/bin/${tool}
           done
-          echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
-
-      - name: Build Kernel with Integrated Root
-        run: |
-          export ARCH=arm64
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
-          make O=out Xinran_PocoF6Pro_defconfig
           
-          # ГАРАНТИРОВАННОЕ ВКЛЮЧЕНИЕ KERNELSU (убирает нужду в патчинге init_boot)
+          make O=out Xinran_PocoF6Pro_defconfig
+          # Включаем KernelSU (Root) на уровне кода ядра
           scripts/config --file out/.config --enable CONFIG_KSU
           scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
           scripts/config --file out/.config --enable CONFIG_SUSFS
           scripts/config --file out/.config --disable CONFIG_DEBUG_INFO_BTF
-          
-          make O=out olddefconfig
           make -j$(nproc --all) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
 
-      - name: Create Professional Flash Package
+      - name: Pack Everything (The Pro Way)
         run: |
           mkdir -p package
-          # Копируем ядро
           cp out/arch/arm64/boot/Image package/Image
           
-          # Загружаем базу LineageOS для стабильности разделов
+          # Берем официальные компоненты LineageOS 23.0
           BASE_URL="https://mirrorbits.lineageos.org/full/vermeer/20260103"
           cd package
           wget -q $BASE_URL/boot.img
@@ -51,39 +43,34 @@ jobs:
           wget -q $BASE_URL/vendor_boot.img
           wget -q $BASE_URL/init_boot.img
           
-          # [span_1](start_span)СОЗДАЕМ АВТОНОМНЫЙ СКРИПТ (Fix ошибки binary/utils.sh)[span_1](end_span)
+          # Генерируем автономный скрипт (Fix для пустых логов)
           cat <<'EOF' > anykernel.sh
-          # AnyKernel3 Professional Deployment
           properties() { '
-          kernel.string=ShiroNeko Kernel Vermeer (KSU Integrated)
+          kernel.string=ShiroNeko Vermeer (Android 16 GKI)
           do.devicecheck=1
           device.name1=vermeer
           '; }
-          block=/dev/block/by-name/boot;
+          block=auto;
           is_slot_device=1;
-          
-          # Прямая прошивка (самый надежный метод для GKI)
-          ui_print "Installing Kernel Image...";
+          ui_print " ";
+          ui_print "--- Установка ShiroNeko PRO ---";
+          ui_print "Прошивка ядра напрямую в Boot...";
           dd if=Image of=/dev/block/by-name/boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
-          
-          # Прошивка разделов для совместимости с OS2.0.206.0
-          ui_print "Syncing DTBO and Vendor partitions...";
+          ui_print "Синхронизация DTBO и Vendor (Android 16)...";
           dd if=dtbo.img of=/dev/block/by-name/dtbo$(getprop ro.boot.slot_suffix) 2>/dev/null;
           dd if=vendor_boot.img of=/dev/block/by-name/vendor_boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
           dd if=init_boot.img of=/dev/block/by-name/init_boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
+          ui_print "Готово! Root (KernelSU) вшит в ядро.";
           EOF
 
-          # Формируем структуру архива с нуля
           mkdir -p META-INF/com/google/android
-          # Заглушка бинарника (Kernel Flasher сам запускает anykernel.sh)
           printf "#!/sbin/sh\nexit 0" > META-INF/com/google/android/update-binary
           chmod +x META-INF/com/google/android/update-binary
-          
-          zip -r9 ../ShiroNeko-Vermeer-Perfect.zip *
+          zip -r9 ../ShiroNeko-Final.zip *
 
-      - name: Upload Final Bundle
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: ShiroNeko-Perfect-Package
-          path: ShiroNeko-Vermeer-Perfect.zip
+          name: ShiroNeko-Perfect-Bundle
+          path: ShiroNeko-Final.zip
 
