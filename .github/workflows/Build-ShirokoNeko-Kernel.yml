@@ -1,6 +1,6 @@
 name: Build ShiroNeko Vermeer Kernel
 on:
-  workflow_dispatch: # Запуск вручную
+  workflow_dispatch:
 
 jobs:
   build:
@@ -29,24 +29,31 @@ jobs:
 
       - name: Build with Kleaf
         run: |
-          # Принудительно используем Bazel из корня репозитория
-          # Флаги перенесены в правильные места
-          bazel build --config=fast --stacktrace //common:kalama_dist
+          # Гарантируем наличие файла WORKSPACE в текущей директории
+          if [ ! -f WORKSPACE ] && [ ! -f WORKSPACE.bazel ]; then
+            touch WORKSPACE
+          fi
+          
+          # Запуск сборки без лишних системных флагов
+          # Используем таргет kalama_dist для SM8550
+          bazel build --config=fast //common:kalama_dist
 
       - name: Package AnyKernel3
         run: |
-          # Создаем папку для артефактов
           mkdir -p output
           
-          # Умный поиск Image и dtbo.img в результатах Bazel
-          # Kleaf генерирует сложную структуру, поэтому используем find
-          find bazel-bin/common -name "Image" -exec cp {} output/ \;
-          find bazel-bin/common -name "dtbo.img" -exec cp {} output/ \; || echo "DTBO не найден"
+          # Поиск собранного образа Image
+          find bazel-bin -name "Image" -exec cp {} output/ \;
+          find bazel-bin -name "dtbo.img" -exec cp {} output/ \; || echo "DTBO не найден"
           
-          # Копируем AnyKernel3 из корня
-          cp -r AnyKernel3/* output/
+          # Проверка наличия AnyKernel3 и упаковка
+          if [ -d "AnyKernel3" ]; then
+            cp -r AnyKernel3/* output/
+          else
+            echo "Ошибка: папка AnyKernel3 не найдена!"
+            exit 1
+          fi
           
-          # Создаем финальный ZIP
           cd output
           rm -rf .git*
           zip -r9 ../ShiroNeko-Vermeer-A16-SuKiSu-SUSFS.zip *
