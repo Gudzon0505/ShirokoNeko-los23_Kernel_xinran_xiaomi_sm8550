@@ -28,11 +28,13 @@ jobs:
           export ARCH=arm64
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           make O=out Xinran_PocoF6Pro_defconfig
-          # Принудительно включаем рут в ядро
+          
+          # ГАРАНТИРОВАННОЕ ВКЛЮЧЕНИЕ КЕРНЕЛСУ В ЯДРО
           scripts/config --file out/.config --enable CONFIG_KSU
           scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
           scripts/config --file out/.config --enable CONFIG_SUSFS
           scripts/config --file out/.config --disable CONFIG_DEBUG_INFO_BTF
+          
           make O=out olddefconfig
           make -j$(nproc --all) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
 
@@ -40,45 +42,45 @@ jobs:
         run: |
           mkdir -p output/tools
           cd output
-          # Фикс ссылки на magiskboot (ошибка 404 исправлена)
-          wget https://github.com/magisk-modules-alt-repo/magiskboot_ndk/raw/main/bin/aarch64/magiskboot -O tools/magiskboot
+          
+          # РАБОЧАЯ ССЫЛКА НА MAGISKBOOT (Устранение ошибки 404)
+          wget https://github.com/Tst-S/magiskboot_ndk/raw/main/bin/aarch64/magiskboot -O tools/magiskboot
           chmod +x tools/magiskboot
           
-          # Загрузка базы LineageOS для Poco F6 Pro
+          # Загрузка базы LineageOS 23.0 (Android 16)
           BASE_URL="https://mirrorbits.lineageos.org/full/vermeer/20260103"
           wget $BASE_URL/boot.img
           wget $BASE_URL/dtbo.img
           wget $BASE_URL/vendor_boot.img
           wget $BASE_URL/init_boot.img
           
-          # Вшиваем ядро в стоковую структуру для исправления "Invalid file"
+          # ПЕРЕПАКОВКА: вставляем наше ядро с рутом в оригинальный boot.img
           ./tools/magiskboot unpack boot.img
           cp ../out/arch/arm64/boot/Image kernel
           ./tools/magiskboot repack boot.img new-boot.img
           mv new-boot.img boot.img
           
-          # [span_1](start_span)Копируем AnyKernel3 и фиксим структуру (ошибка utils.sh исправлена)[span_1](end_span)
+          # ФИКС СТРУКТУРЫ ANYKERNEL3 (Исправление ошибки utils.sh)
           if [ -d "../AnyKernel3" ]; then cp -r ../AnyKernel3/* .; fi
           mkdir -p META-INF/com/google/android
           
-          # Создаем надежный скрипт прошивки
+          # СОЗДАЕМ АВТОНОМНЫЙ СКРИПТ (Прямая прошивка без лишних проверок)
           cat <<'EOF' > anykernel.sh
           properties() { '
-          kernel.string=ShiroNeko Kernel Vermeer (KSU+SUSFS)
+          kernel.string=ShiroNeko Kernel Vermeer (KSU Inside)
           do.devicecheck=1
           device.name1=vermeer
           '; }
           block=auto;
           is_slot_device=1;
-          # Используем прямую прошивку перепакованных образов
-          ui_print "Flashing integrated images...";
+          ui_print "Flashing all partitions...";
           EOF
 
-          zip -r9 ../ShiroNeko-Vermeer-Final.zip *
+          zip -r9 ../ShiroNeko-Vermeer-Perfect.zip *
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ShiroNeko-Ultimate-Package
-          path: ShiroNeko-Vermeer-Final.zip
+          path: ShiroNeko-Vermeer-Perfect.zip
 
