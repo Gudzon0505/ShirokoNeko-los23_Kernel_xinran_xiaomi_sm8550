@@ -1,4 +1,5 @@
-name: ShiroNeko Vermeer PRO Final
+
+name: Build ShiroNeko Vermeer PRO
 on:
   workflow_dispatch:
 
@@ -12,7 +13,7 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 1
 
-      - name: Build Kernel with Root (KSU)
+      - name: Build Kernel with Integrated KSU
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 zip wget rsync lld-15 clang-15 dwarves
@@ -23,19 +24,20 @@ jobs:
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           
           make O=out Xinran_PocoF6Pro_defconfig
-          # Вшиваем KernelSU в бинарный код ядра
+          # Вшиваем KernelSU в код ядра (убирает нужду в патчинге init_boot)
           scripts/config --file out/.config --enable CONFIG_KSU
           scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
           scripts/config --file out/.config --enable CONFIG_SUSFS
           scripts/config --file out/.config --disable CONFIG_DEBUG_INFO_BTF
           make -j$(nproc --all) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
 
-      - name: Create Autonomous Package
+      - name: Package Professional Flash Tool
         run: |
           mkdir -p package/META-INF/com/google/android
+          # Копируем ядро
           cp out/arch/arm64/boot/Image package/Image
           
-          # Берем официальные компоненты LineageOS (база со скриншота)
+          # Берем официальные файлы LineageOS (база со скриншота 284)
           BASE_URL="https://mirrorbits.lineageos.org/full/vermeer/20260103"
           cd package
           wget -q $BASE_URL/boot.img
@@ -43,7 +45,7 @@ jobs:
           wget -q $BASE_URL/vendor_boot.img
           wget -q $BASE_URL/init_boot.img
           
-          # Генерируем автономный скрипт без внешних зависимостей (Fix utils.sh)
+          # СОЗДАЕМ АВТОНОМНЫЙ СКРИПТ (Fix: больше никакой зависимости от utils.sh)
           cat <<'EOF' > anykernel.sh
           properties() { '
           kernel.string=ShiroNeko Kernel Vermeer (GKI PRO)
@@ -52,26 +54,29 @@ jobs:
           '; }
           block=auto;
           is_slot_device=1;
-          ui_print " ";
-          ui_print "--- ShiroNeko Professional Flasher ---";
-          ui_print "Installing Kernel Image...";
+          
+          ui_print " "
+          ui_print "--- SHIRONEKO KERNEL INSTALLER ---"
+          ui_print "Device: Poco F6 Pro (vermeer)"
+          ui_print "Installing Kernel Image to Boot..."
           dd if=Image of=/dev/block/by-name/boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
-          ui_print "Updating partitions for Android 16...";
+          
+          ui_print "Updating GKI 2.0 Partitions (Android 16)..."
           dd if=dtbo.img of=/dev/block/by-name/dtbo$(getprop ro.boot.slot_suffix) 2>/dev/null;
           dd if=vendor_boot.img of=/dev/block/by-name/vendor_boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
           dd if=init_boot.img of=/dev/block/by-name/init_boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
-          ui_print "Done! Root (KernelSU) is integrated.";
+          
+          ui_print "Installation Complete! Reboot now."
           EOF
 
-          # Заглушка бинарника для Kernel Flasher
+          # Бинарник-пустышка для запуска
           printf "#!/sbin/sh\nexit 0" > META-INF/com/google/android/update-binary
           chmod +x META-INF/com/google/android/update-binary
           
           zip -r9 ../ShiroNeko-Final-PRO.zip *
 
-      - name: Upload
+      - name: Upload Package
         uses: actions/upload-artifact@v4
         with:
-          name: ShiroNeko-Ultimate-Package
+          name: ShiroNeko-Perfect-Bundle
           path: ShiroNeko-Final-PRO.zip
-
