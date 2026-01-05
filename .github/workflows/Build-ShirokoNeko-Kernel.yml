@@ -12,7 +12,7 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 1
 
-      - name: Install Compilers
+      - name: Install Build Environment
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 zip wget rsync lld-15 clang-15 dwarves
@@ -22,12 +22,12 @@ jobs:
           done
           echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
 
-      - name: Build Kernel with Integrated Root
+      - name: Build Kernel with Built-in Root
         run: |
           export ARCH=arm64
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           make O=out Xinran_PocoF6Pro_defconfig
-          # Принудительное вшивание KernelSU и SUSFS (убирает нужду в патчинге init_boot)
+          # Включаем KernelSU и SUSFS на уровне исходного кода
           scripts/config --file out/.config --enable CONFIG_KSU
           scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
           scripts/config --file out/.config --enable CONFIG_SUSFS
@@ -35,13 +35,13 @@ jobs:
           make O=out olddefconfig
           make -j$(nproc --all) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
 
-      - name: Create Professional Flash Package
+      - name: Create Reliable Flash Package
         run: |
           mkdir -p package
-          # Копируем скомпилированное ядро
+          # Ядро для ручной прошивки (через "Flash Image")
           cp out/arch/arm64/boot/Image package/Image
           
-          # Скачиваем официальные файлы LineageOS (база для стабильности)
+          # База LineageOS для стабильности разделов
           BASE_URL="https://mirrorbits.lineageos.org/full/vermeer/20260103"
           cd package
           wget -q $BASE_URL/boot.img
@@ -49,10 +49,9 @@ jobs:
           wget -q $BASE_URL/vendor_boot.img
           wget -q $BASE_URL/init_boot.img
           
-          # Создаем автономный скрипт AnyKernel3 (БЕЗ зависимости от binary/utils.sh)
-          # Это решает ошибку из лога
+          # Создаем автономный скрипт (РЕШЕНИЕ ОШИБКИ 'binary/utils.sh')
           cat <<'EOF' > anykernel.sh
-          # AnyKernel3 Professional Deployment
+          # AnyKernel3 Pro Deployment
           properties() { '
           kernel.string=ShiroNeko Kernel Vermeer (KSU Integrated)
           do.devicecheck=1
@@ -61,25 +60,24 @@ jobs:
           block=/dev/block/by-name/boot;
           is_slot_device=1;
           
-          # Прямая прошивка Image в раздел boot (самый надежный метод для GKI)
+          # Прямая прошивка Image в раздел boot (надежнее перепаковки для GKI)
           ui_print "Installing Kernel Image...";
           dd if=Image of=/dev/block/by-name/boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
           
-          # Прошивка стоковых разделов для совместимости с Android 16
-          ui_print "Syncing DTBO and Vendor partitions...";
+          # Прошивка обязательных разделов Android 16
+          ui_print "Syncing Official LineageOS Partitions...";
           dd if=dtbo.img of=/dev/block/by-name/dtbo$(getprop ro.boot.slot_suffix) 2>/dev/null;
           dd if=vendor_boot.img of=/dev/block/by-name/vendor_boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
           dd if=init_boot.img of=/dev/block/by-name/init_boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
           EOF
 
-          # Создаем минимально необходимую структуру ZIP
+          # Минимальная структура для Kernel Flasher
           mkdir -p META-INF/com/google/android
-          # Используем заглушку бинарника, так как Kernel Flasher сам умеет исполнять скрипт
           touch META-INF/com/google/android/update-binary
           
           zip -r9 ../ShiroNeko-Vermeer-PRO.zip *
 
-      - name: Upload Artifact
+      - name: Upload Final Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ShiroNeko-Professional-Package
