@@ -1,92 +1,58 @@
-name: Build GudzonKernel (Vermeer A16)
-
+name: Build ShiroNeko Vermeer Kernel
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Запуск вручную через вкладку Actions
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Build Kernel by Gemini
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout Source
         uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+          fetch-depth: 0
 
-      - name: Install Toolchain (AOSP Clang 19)
+      - name: Set up Build Environment
         run: |
-          sudo apt-get update && sudo apt-get install -y bc bison build-essential flex git lld llvm python3 rsync libssl-dev libelf-dev zip
-          mkdir -p $GITHUB_WORKSPACE/clang-aosp
-          # Используем стабильный Clang r530567 для Android 16
-          curl -Lo clang.tar.gz https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r530567.tar.gz
-          tar -C $GITHUB_WORKSPACE/clang-aosp -xzf clang.tar.gz
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex git git-lfs gnupg \
+          gperf libelf-dev libssl-dev openjdk-11-jdk python3 python-is-python3 \
+          zip expect libncurses-dev wget curl rsync
 
-      - name: Integrate SukiSU & SUSFS 2.0
+      - name: Install Bazel
         run: |
-          # 1. Интеграция SukiSU
-          git clone --depth=1 https://github.com/SukiSU-Ultra/SukiSU-Ultra.git sukisu-temp
-          # Автоматический поиск скрипта setup.sh (фикс ошибки No such file)
-          SETUP_PATH=$(find sukisu-temp -name "setup.sh" | head -n 1)
-          chmod +x "$SETUP_PATH"
-          # Используем ветку main для SukiSU (фикс ошибки pathspec)
-          ./"$SETUP_PATH" main
-          rm -rf sukisu-temp
-          
-          # 2. Интеграция SUSFS Patches для ядра 5.15.196
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs
-          cp /tmp/susfs/kernel/include/linux/susfs.h include/linux/
-          cp /tmp/susfs/kernel/fs/susfs.c fs/
-          
-          # Применяем патчи VFS специально для ветки 5.15 (фикс ошибки exit code 128)
-          patch -p1 < /tmp/susfs/kernel/fs/0001-vfs-Add-susfs-hooks-to-vfs-5.15.patch || true
-          patch -p1 < /tmp/susfs/kernel/include/linux/0001-vfs-Add-susfs-hooks-to-vfs-5.15.patch || true
+          curl -fPsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor > bazel-archive-keyring.gpg
+          sudo mv bazel-archive-keyring.gpg /usr/share/keyrings/bazel-archive-keyring.gpg
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/bazel-archive-keyring.gpg] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
+          sudo apt-get update && sudo apt-get install -y bazel
 
-      - name: Configure GudzonKernel
+      - name: Build with Kleaf
         run: |
-          export PATH=$GITHUB_WORKSPACE/clang-aosp/bin:$PATH
-          export ARCH=arm64
-          # Используем gki_defconfig как базу для Vermeer
-          make O=out vendor/gki_defconfig
-          
-          chmod +x scripts/config
-          # Установка имени ядра
-          ./scripts/config --file out/.config --set-str LOCALVERSION "-GudzonKernel"
-          
-          # Включаем SUSFS и скрытие
-          ./scripts/config --file out/.config -e SUSFS
-          ./scripts/config --file out/.config -e KSU_SUSFS
-          ./scripts/config --file out/.config -e SUSFS_MAGIC_MOUNT
-          
-          # Отключаем подписи модулей (защита от бутлупа на LineageOS)
-          ./scripts/config --file out/.config -d MODULE_SIG
-          ./scripts/config --file out/.config -d MODULE_SIG_ALL
-          ./scripts/config --file out/.config -d DEBUG_INFO_BTF
-          ./scripts/config --file out/.config -e LTO_CLANG_THIN
-          
-          make O=out olddefconfig
+          # Используем официальный инструмент bazel из твоего репозитория
+          # Сборка таргета kalama для Snapdragon 8 Gen 2
+          ./tools/bazel build --config=fast //common:kalama_dist
 
-      - name: Compilation (GudzonKernel 5.15)
+      - name: Package AnyKernel3
         run: |
-          export PATH=$GITHUB_WORKSPACE/clang-aosp/bin:$PATH
-          make -j$(nproc --all) O=out \
-            ARCH=arm64 \
-            CC=clang \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            LLVM=1 LLVM_IAS=1 \
-            Image dtbo.img
-
-      - name: Package for Vermeer (AnyKernel3)
-        run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git
-          cp out/arch/arm64/boot/Image AnyKernel3/
-          # Добавляем DTBO для корректной работы экрана и зарядки
-          [ -f out/arch/arm64/boot/dtbo.img ] && cp out/arch/arm64/boot/dtbo.img AnyKernel3/
+          # Создаем рабочую директорию
+          mkdir -p output
           
-          cd AnyKernel3
-          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
-          zip -r9 "../GudzonKernel-Vermeer-A16-Build.zip" *
+          # Копируем собранное ядро и DTB из артефактов Bazel
+          # Пути могут отличаться в зависимости от структуры Kleaf, обычно это bazel-out
+          cp bazel-bin/common/kalama/Image output/
+          cp bazel-bin/common/kalama/dtbo.img output/ || echo "DTBO not found"
+          
+          # Копируем твой настроенный AnyKernel3
+          cp -r AnyKernel3/* output/
+          
+          # Создаем финальный ZIP
+          cd output
+          zip -r9 ../ShiroNeko-Vermeer-A16-SuKiSu.zip *
 
-      - name: Upload Artifact
+      - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: GudzonKernel-Package
-          path: ./*.zip
+          name: ShiroNeko-Vermeer-Kernel
+          path: ShiroNeko-Vermeer-A16-SuKiSu.zip
 
