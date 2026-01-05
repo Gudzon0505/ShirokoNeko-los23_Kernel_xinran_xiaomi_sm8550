@@ -16,9 +16,10 @@ jobs:
       - name: Install Compilers and Tools
         run: |
           sudo apt-get update
-          # Добавлен пакет dwarves для наличия pahole
+          # Установка базовых инструментов и dwarves для pahole
           sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 zip wget curl rsync lld-15 llvm-15 clang-15 dwarves
           
+          # Настройка путей для инструментов LLVM
           mkdir -p $GITHUB_WORKSPACE/bin
           ln -sf /usr/bin/clang-15 $GITHUB_WORKSPACE/bin/clang
           ln -sf /usr/bin/ld.lld-15 $GITHUB_WORKSPACE/bin/ld.lld
@@ -36,13 +37,13 @@ jobs:
           export SUBARCH=arm64
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           
-          # 1. Применяем конфиг
+          # Применяем конфигурацию для Poco F6 Pro
           make O=out Xinran_PocoF6Pro_defconfig
           
-          # 2. Отключаем BTF, чтобы избежать ошибок совместимости pahole
+          # Отключаем BTF, чтобы избежать ошибок компиляции vmlinux
           scripts/config --file out/.config --disable CONFIG_DEBUG_INFO_BTF
           
-          # 3. Запуск основной сборки
+          # Запуск компиляции
           make -j$(nproc --all) O=out \
             CC=clang \
             LD=ld.lld \
@@ -56,34 +57,41 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
 
-      - name: Package AnyKernel3
+      - name: Package AnyKernel3 (GKI Fix)
         run: |
           mkdir -p output
-          # Проверяем Image.gz или Image в зависимости от твоего конфига
+          
+          # Копируем скомпилированное ядро
           if [ -f out/arch/arm64/boot/Image ]; then
             cp out/arch/arm64/boot/Image output/
-          elif [ -f out/arch/arm64/boot/Image.gz ]; then
-            cp out/arch/arm64/boot/Image.gz output/
           else
-            echo "Ошибка: Ядро не найдено!"
+            echo "Ошибка: Файл Image не найден!"
             exit 1
           fi
           
-          find out/arch/arm64/boot -name "dtbo.img" -exec cp {} output/ \; || echo "DTBO не найден"
-          
+          # Копируем AnyKernel3 из исходников
           if [ -d "AnyKernel3" ]; then
             cp -r AnyKernel3/* output/
           else
-            echo "Ошибка: AnyKernel3 не найден!"
+            echo "Ошибка: Папка AnyKernel3 не найдена!"
             exit 1
           fi
           
+          # --- ФИКС ДЛЯ ПРОШИВКИ (Android 16 / No Ramdisk) ---
+          # 1. Отключаем проверку устройства для теста (можно вернуть потом)
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' output/anykernel.sh
+          # 2. Указываем скрипту работать в режиме "только ядро" без распаковки ramdisk
+          sed -i 's/block=\/dev\/block\/by-name\/boot/block=auto/g' output/anykernel.sh
+          # 3. Убираем требование наличия ramdisk для работы скрипта
+          sed -i 's/split_boot;/dump_boot;/g' output/anykernel.sh
+          sed -i 's/flash_boot;/write_boot;/g' output/anykernel.sh
+          
           cd output
-          zip -r9 ../ShiroNeko-Vermeer-A16-KSU-SUSFS.zip *
+          zip -r9 ../ShiroNeko-Vermeer-A16-Fixed.zip *
 
       - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: ShiroNeko-Vermeer-Kernel
-          path: ShiroNeko-Vermeer-A16-KSU-SUSFS.zip
+          name: ShiroNeko-Vermeer-Fixed-Kernel
+          path: ShiroNeko-Vermeer-A16-Fixed.zip
 
