@@ -29,24 +29,24 @@ jobs:
 
       - name: Build with Kleaf
         run: |
-          # Используем системный bazel, так как папка ./tools отсутствует в корне
-          # Команда запускает сборку для платформы kalama (SM8550)
-          bazel build --config=fast //common:kalama_dist
+          # Убеждаемся, что мы в корне, где лежат BUILD.bazel и WORKSPACE
+          # Используем системный bazel с флагом --workspace_rc=false для чистоты
+          bazel --stacktrace build --config=fast //common:kalama_dist
 
       - name: Package AnyKernel3
         run: |
-          # Создаем папку для сборки финального архива
+          # Создаем папку для сборки
           mkdir -p output
           
-          # Копируем ядро и DTBO из результатов сборки Bazel
-          # Пути bazel-bin соответствуют стандартной структуре Kleaf
-          cp bazel-bin/common/kalama/Image output/ || cp bazel-bin/common/Image output/
-          cp bazel-bin/common/kalama/dtbo.img output/ || echo "DTBO не найден"
+          # Копируем результаты сборки. Bazel кладет их в bazel-bin
+          # Используем find, чтобы найти Image, если путь в bazel-bin изменится
+          find bazel-bin -name "Image" -exec cp {} output/ \;
+          find bazel-bin -name "dtbo.img" -exec cp {} output/ \; || echo "DTBO не найден"
           
-          # Копируем твой настроенный AnyKernel3
+          # Копируем AnyKernel3
           cp -r AnyKernel3/* output/
           
-          # Упаковываем всё в ZIP для прошивки
+          # Собираем ZIP
           cd output
           rm -rf .git*
           zip -r9 ../ShiroNeko-Vermeer-A16-SuKiSu-SUSFS.zip *
