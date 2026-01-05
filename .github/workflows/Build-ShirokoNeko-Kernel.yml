@@ -16,12 +16,10 @@ jobs:
       - name: Install Compilers and Tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 zip wget curl rsync lld-15 llvm-15 clang-15
+          # Добавлен пакет dwarves для наличия pahole
+          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 zip wget curl rsync lld-15 llvm-15 clang-15 dwarves
           
-          # Создаем рабочую директорию для бинарников
           mkdir -p $GITHUB_WORKSPACE/bin
-          
-          # Создаем жесткие ссылки для инструментов LLVM
           ln -sf /usr/bin/clang-15 $GITHUB_WORKSPACE/bin/clang
           ln -sf /usr/bin/ld.lld-15 $GITHUB_WORKSPACE/bin/ld.lld
           ln -sf /usr/bin/llvm-nm-15 $GITHUB_WORKSPACE/bin/llvm-nm
@@ -30,20 +28,21 @@ jobs:
           ln -sf /usr/bin/llvm-objdump-15 $GITHUB_WORKSPACE/bin/llvm-objdump
           ln -sf /usr/bin/llvm-strip-15 $GITHUB_WORKSPACE/bin/llvm-strip
           
-          # Добавляем наш путь в системный PATH
           echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
 
       - name: Build Kernel
         run: |
-          # Экспортируем переменные для компиляции
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           
-          # Очистка и применение конфига
+          # 1. Применяем конфиг
           make O=out Xinran_PocoF6Pro_defconfig
           
-          # Запуск сборки с явным указанием инструментов
+          # 2. Отключаем BTF, чтобы избежать ошибок совместимости pahole
+          scripts/config --file out/.config --disable CONFIG_DEBUG_INFO_BTF
+          
+          # 3. Запуск основной сборки
           make -j$(nproc --all) O=out \
             CC=clang \
             LD=ld.lld \
@@ -60,17 +59,18 @@ jobs:
       - name: Package AnyKernel3
         run: |
           mkdir -p output
+          # Проверяем Image.gz или Image в зависимости от твоего конфига
           if [ -f out/arch/arm64/boot/Image ]; then
             cp out/arch/arm64/boot/Image output/
+          elif [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp out/arch/arm64/boot/Image.gz output/
           else
-            echo "Ошибка: Файл Image не найден. Сборка не удалась."
+            echo "Ошибка: Ядро не найдено!"
             exit 1
           fi
           
-          # Поиск DTBO
           find out/arch/arm64/boot -name "dtbo.img" -exec cp {} output/ \; || echo "DTBO не найден"
           
-          # Копируем твой AnyKernel3
           if [ -d "AnyKernel3" ]; then
             cp -r AnyKernel3/* output/
           else
