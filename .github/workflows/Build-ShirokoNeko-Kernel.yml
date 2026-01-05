@@ -1,6 +1,6 @@
 name: Build ShiroNeko Vermeer Kernel
 on:
-  workflow_dispatch: # Запуск вручную через вкладку Actions
+  workflow_dispatch: # Запуск вручную
 
 jobs:
   build:
@@ -29,30 +29,31 @@ jobs:
 
       - name: Build with Kleaf
         run: |
-          # Используем официальный инструмент bazel из твоего репозитория
-          # Сборка таргета kalama для Snapdragon 8 Gen 2
-          ./tools/bazel build --config=fast //common:kalama_dist
+          # Используем системный bazel, так как папка ./tools отсутствует в корне
+          # Команда запускает сборку для платформы kalama (SM8550)
+          bazel build --config=fast //common:kalama_dist
 
       - name: Package AnyKernel3
         run: |
-          # Создаем рабочую директорию
+          # Создаем папку для сборки финального архива
           mkdir -p output
           
-          # Копируем собранное ядро и DTB из артефактов Bazel
-          # Пути могут отличаться в зависимости от структуры Kleaf, обычно это bazel-out
-          cp bazel-bin/common/kalama/Image output/
-          cp bazel-bin/common/kalama/dtbo.img output/ || echo "DTBO not found"
+          # Копируем ядро и DTBO из результатов сборки Bazel
+          # Пути bazel-bin соответствуют стандартной структуре Kleaf
+          cp bazel-bin/common/kalama/Image output/ || cp bazel-bin/common/Image output/
+          cp bazel-bin/common/kalama/dtbo.img output/ || echo "DTBO не найден"
           
           # Копируем твой настроенный AnyKernel3
           cp -r AnyKernel3/* output/
           
-          # Создаем финальный ZIP
+          # Упаковываем всё в ZIP для прошивки
           cd output
-          zip -r9 ../ShiroNeko-Vermeer-A16-SuKiSu.zip *
+          rm -rf .git*
+          zip -r9 ../ShiroNeko-Vermeer-A16-SuKiSu-SUSFS.zip *
 
-      - name: Upload Kernel
+      - name: Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ShiroNeko-Vermeer-Kernel
-          path: ShiroNeko-Vermeer-A16-SuKiSu.zip
+          path: ShiroNeko-Vermeer-A16-SuKiSu-SUSFS.zip
 
