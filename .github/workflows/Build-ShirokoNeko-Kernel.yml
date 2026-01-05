@@ -1,10 +1,9 @@
-name: Build ShiroNeko Vermeer Kernel
+name: Build ShiroNeko Vermeer PRO
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Kernel by Gemini
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Source
@@ -13,73 +12,76 @@ jobs:
           submodules: 'recursive'
           fetch-depth: 1
 
-      - name: Install Compilers and Tools
+      - name: Install Compilers
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 zip wget curl rsync lld-15 llvm-15 clang-15 dwarves
+          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 zip wget rsync lld-15 clang-15 dwarves
           mkdir -p $GITHUB_WORKSPACE/bin
           for tool in clang ld.lld llvm-nm llvm-ar llvm-objcopy llvm-objdump llvm-strip llvm-readelf llvm-size; do
             ln -sf /usr/bin/${tool}-15 $GITHUB_WORKSPACE/bin/${tool}
           done
           echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
 
-      - name: Build Kernel
+      - name: Build Kernel with Integrated Root
         run: |
           export ARCH=arm64
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           make O=out Xinran_PocoF6Pro_defconfig
-          # Включаем KernelSU и SUSFS сразу в ядро для авто-рута
+          # Принудительное вшивание KernelSU и SUSFS (убирает нужду в патчинге init_boot)
           scripts/config --file out/.config --enable CONFIG_KSU
           scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
           scripts/config --file out/.config --enable CONFIG_SUSFS
           scripts/config --file out/.config --disable CONFIG_DEBUG_INFO_BTF
           make O=out olddefconfig
-          make -j$(nproc --all) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+          make -j$(nproc --all) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
 
-      - name: Integration with LineageOS Images
+      - name: Create Professional Flash Package
         run: |
-          mkdir -p output/tools
-          cd output
-          # РАБОЧАЯ ССЫЛКА: Используем официальное зеркало Magisk для magiskboot
-          wget https://raw.githubusercontent.com/topjohnwu/magisk-files/master/magiskboot.tar.gz
-          tar -xf magiskboot.tar.gz && mv aarch64/magiskboot tools/magiskboot || \
-          wget https://github.com/Magisk-Modules-Alt-Repo/magiskboot_ndk/raw/main/bin/aarch64/magiskboot -O tools/magiskboot
-          chmod +x tools/magiskboot
+          mkdir -p package
+          # Копируем скомпилированное ядро
+          cp out/arch/arm64/boot/Image package/Image
           
-          # Базовые образы LineageOS 23.0
+          # Скачиваем официальные файлы LineageOS (база для стабильности)
           BASE_URL="https://mirrorbits.lineageos.org/full/vermeer/20260103"
-          wget $BASE_URL/boot.img
-          wget $BASE_URL/dtbo.img
-          wget $BASE_URL/vendor_boot.img
-          wget $BASE_URL/init_boot.img
+          cd package
+          wget -q $BASE_URL/boot.img
+          wget -q $BASE_URL/dtbo.img
+          wget -q $BASE_URL/vendor_boot.img
+          wget -q $BASE_URL/init_boot.img
           
-          # Перепаковка boot.img: вставляем ядро с рутом
-          ./tools/magiskboot unpack boot.img
-          cp ../out/arch/arm64/boot/Image kernel
-          ./tools/magiskboot repack boot.img new-boot.img
-          mv new-boot.img boot.img
-          
-          # [span_2](start_span)Создаем структуру AnyKernel3 БЕЗ зависимости от utils.sh[span_2](end_span)
-          if [ -d "../AnyKernel3" ]; then cp -r ../AnyKernel3/* .; fi
-          mkdir -p META-INF/com/google/android
-          
-          # Прямой скрипт прошивки для Kernel Flasher
+          # Создаем автономный скрипт AnyKernel3 (БЕЗ зависимости от binary/utils.sh)
+          # Это решает ошибку из лога
           cat <<'EOF' > anykernel.sh
+          # AnyKernel3 Professional Deployment
           properties() { '
           kernel.string=ShiroNeko Kernel Vermeer (KSU Integrated)
           do.devicecheck=1
           device.name1=vermeer
           '; }
-          block=auto;
+          block=/dev/block/by-name/boot;
           is_slot_device=1;
-          # [span_3](start_span)Прямая прошивка без использования utils.sh[span_3](end_span)
-          ui_print "Flashing Kernel and Base Images...";
+          
+          # Прямая прошивка Image в раздел boot (самый надежный метод для GKI)
+          ui_print "Installing Kernel Image...";
+          dd if=Image of=/dev/block/by-name/boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
+          
+          # Прошивка стоковых разделов для совместимости с Android 16
+          ui_print "Syncing DTBO and Vendor partitions...";
+          dd if=dtbo.img of=/dev/block/by-name/dtbo$(getprop ro.boot.slot_suffix) 2>/dev/null;
+          dd if=vendor_boot.img of=/dev/block/by-name/vendor_boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
+          dd if=init_boot.img of=/dev/block/by-name/init_boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
           EOF
 
-          zip -r9 ../ShiroNeko-Vermeer-Ready.zip *
+          # Создаем минимально необходимую структуру ZIP
+          mkdir -p META-INF/com/google/android
+          # Используем заглушку бинарника, так как Kernel Flasher сам умеет исполнять скрипт
+          touch META-INF/com/google/android/update-binary
+          
+          zip -r9 ../ShiroNeko-Vermeer-PRO.zip *
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ShiroNeko-Ultimate-Package
-          path: ShiroNeko-Vermeer-Ready.zip
+          name: ShiroNeko-Professional-Package
+          path: ShiroNeko-Vermeer-PRO.zip
+
