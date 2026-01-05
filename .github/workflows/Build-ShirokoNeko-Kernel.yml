@@ -17,31 +17,54 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 zip wget curl rsync lld-15 llvm-15 clang-15 dwarves
+          
+          # Создаем бинарную директорию и жесткие ссылки
           mkdir -p $GITHUB_WORKSPACE/bin
-          ln -sf /usr/bin/clang-15 $GITHUB_WORKSPACE/bin/clang
-          ln -sf /usr/bin/ld.lld-15 $GITHUB_WORKSPACE/bin/ld.lld
+          for tool in clang ld.lld llvm-nm llvm-ar llvm-objcopy llvm-objdump llvm-strip llvm-readelf; do
+            ln -sf /usr/bin/${tool}-15 $GITHUB_WORKSPACE/bin/${tool}
+          done
+          
+          # Добавляем в PATH
           echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
 
       - name: Build Kernel
         run: |
           export ARCH=arm64
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
+          
+          # Применяем конфиг
           make O=out Xinran_PocoF6Pro_defconfig
+          
+          # Отключаем BTF для стабильности
           scripts/config --file out/.config --disable CONFIG_DEBUG_INFO_BTF
-          make -j$(nproc --all) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+          
+          # Запуск сборки с принудительным указанием всех инструментов LLVM
+          make -j$(nproc --all) O=out \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            READELF=llvm-readelf \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
 
       - name: Package AnyKernel3 (GKI Direct Flash Fix)
         run: |
           mkdir -p output
           cp out/arch/arm64/boot/Image output/
           
-          # Копируем базовые файлы AnyKernel3 (кроме скрипта)
+          # Копируем базовые файлы AnyKernel3 если они есть
           if [ -d "AnyKernel3" ]; then
             cp -r AnyKernel3/* output/
           fi
 
-          # СОЗДАЕМ ИСПРАВЛЕННЫЙ СКРИПТ С НУЛЯ
-          cat <<EOF > output/anykernel.sh
+          # СОЗДАЕМ ИСПРАВЛЕННЫЙ СКРИПТ (Фикс "No ramdisk found")
+          cat <<'EOF' > output/anykernel.sh
           # AnyKernel3 Deployment Script
           properties() { '
           kernel.string=ShiroNeko Kernel for Poco F6 Pro (vermeer)
@@ -54,7 +77,7 @@ jobs:
           supported.versions=13, 14, 15, 16
           '; }
 
-          # Настройка для GKI устройств (прошивка только Image)
+          # Настройка GKI: прошивка только Image в boot раздел
           block=auto;
           is_slot_device=1;
           ramdisk_compression=auto;
@@ -62,20 +85,17 @@ jobs:
 
           . binary/utils.sh;
 
-          split_boot; # Для GKI это просто определит структуру
-
-          # ФИКС: Вместо распаковки ramdisk, просто подменяем ядро
-          replace_kernel; 
-
+          # ФИКС: Вместо распаковки (split_boot), сразу подменяем Image
+          dump_boot; 
           write_boot;
           EOF
 
           cd output
-          zip -r9 ../ShiroNeko-Vermeer-Fixed-v2.zip *
+          zip -r9 ../ShiroNeko-Vermeer-Ready.zip *
 
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: ShiroNeko-Vermeer-Final
-          path: ShiroNeko-Vermeer-Fixed-v2.zip
+          name: ShiroNeko-Vermeer-Kernel
+          path: ShiroNeko-Vermeer-Ready.zip
 
