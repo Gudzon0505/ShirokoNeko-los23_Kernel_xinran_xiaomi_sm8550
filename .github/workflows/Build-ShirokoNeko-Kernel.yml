@@ -20,34 +20,24 @@ jobs:
           gperf libelf-dev libssl-dev openjdk-11-jdk python3 python-is-python3 \
           zip expect libncurses-dev wget curl rsync lld llvm clang
 
-      - name: Install Bazel
+      - name: Build with Local Kleaf Tools
         run: |
-          curl -fPsSL https://bazel.build/bazel-release.pub.gpg | gpg --dearmor > bazel-archive-keyring.gpg
-          sudo mv bazel-archive-keyring.gpg /usr/share/keyrings/bazel-archive-keyring.gpg
-          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/bazel-archive-keyring.gpg] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
-          sudo apt-get update && sudo apt-get install -y bazel
-
-      - name: Build with Kleaf
-        run: |
-          # 1. Исправляем проблему WORKSPACE
-          if [ ! -f WORKSPACE ]; then touch WORKSPACE; fi
+          # 1. Даем права на выполнение встроенным инструментам
+          chmod +x tools/bazel
           
-          # 2. Очистка кеша перед сборкой для исключения конфликтов
-          bazel clean --expunge
-          
-          # 3. Запуск сборки без флага --config=fast, который вызывал ошибку
-          # Используем прямой путь к цели сборки в корне
-          bazel build //:kalama_dist
+          # 2. Запускаем сборку через локальный bazel. 
+          # Мы используем прямой путь к цели kalama_dist в корне
+          ./tools/bazel build //:kalama_dist
 
       - name: Package AnyKernel3
         run: |
           mkdir -p output
           
-          # Поиск собранного образа Image и DTBO
+          # Поиск собранного ядра Image и DTBO в выводе bazel-bin
           find bazel-bin -name "Image" -exec cp {} output/ \;
           find bazel-bin -name "dtbo.img" -exec cp {} output/ \; || echo "DTBO не найден"
           
-          # Копируем AnyKernel3, настроенный под vermeer
+          # Использование твоего модифицированного AnyKernel3 для Poco F6 Pro
           if [ -d "AnyKernel3" ]; then
             cp -r AnyKernel3/* output/
           else
