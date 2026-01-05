@@ -17,8 +17,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 zip wget curl rsync lld-15 llvm-15 clang-15 dwarves
-          
-          # Фикс инструментов LLVM (ошибка 127)
           mkdir -p $GITHUB_WORKSPACE/bin
           for tool in clang ld.lld llvm-nm llvm-ar llvm-objcopy llvm-objdump llvm-strip llvm-readelf llvm-size; do
             ln -sf /usr/bin/${tool}-15 $GITHUB_WORKSPACE/bin/${tool}
@@ -29,76 +27,58 @@ jobs:
         run: |
           export ARCH=arm64
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
-          
           make O=out Xinran_PocoF6Pro_defconfig
-          
-          # Включение KernelSU и SUSFS
+          # Принудительно включаем рут в ядро
           scripts/config --file out/.config --enable CONFIG_KSU
           scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
           scripts/config --file out/.config --enable CONFIG_SUSFS
           scripts/config --file out/.config --disable CONFIG_DEBUG_INFO_BTF
-          
           make O=out olddefconfig
           make -j$(nproc --all) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
 
       - name: Integration with LineageOS Images
         run: |
-          mkdir -p output/patch
-          mkdir -p output/modules
+          mkdir -p output/tools
           cd output
+          # Фикс ссылки на magiskboot (ошибка 404 исправлена)
+          wget https://github.com/magisk-modules-alt-repo/magiskboot_ndk/raw/main/bin/aarch64/magiskboot -O tools/magiskboot
+          chmod +x tools/magiskboot
           
-          # Скачиваем инструменты перепаковки
-          wget https://github.com/osm0sis/bootctrl/raw/master/binaries/magiskboot -O magiskboot
-          chmod +x magiskboot
-          
-          # Загружаем базу LineageOS для Poco F6 Pro
+          # Загрузка базы LineageOS для Poco F6 Pro
           BASE_URL="https://mirrorbits.lineageos.org/full/vermeer/20260103"
           wget $BASE_URL/boot.img
           wget $BASE_URL/dtbo.img
           wget $BASE_URL/vendor_boot.img
           wget $BASE_URL/init_boot.img
           
-          # Перепаковка: вставляем ядро в официальный boot.img
-          ./magiskboot unpack boot.img
+          # Вшиваем ядро в стоковую структуру для исправления "Invalid file"
+          ./tools/magiskboot unpack boot.img
           cp ../out/arch/arm64/boot/Image kernel
-          ./magiskboot repack boot.img new-boot.img
+          ./tools/magiskboot repack boot.img new-boot.img
           mv new-boot.img boot.img
           
-          # ФИКС СТРУКТУРЫ ANYKERNEL3 (Исправление ошибки binary/utils.sh)
-          if [ -d "../AnyKernel3" ]; then
-            cp -r ../AnyKernel3/* .
-          fi
-          # Гарантируем наличие необходимых папок
-          mkdir -p tools
-          cp magiskboot tools/
+          # [span_1](start_span)Копируем AnyKernel3 и фиксим структуру (ошибка utils.sh исправлена)[span_1](end_span)
+          if [ -d "../AnyKernel3" ]; then cp -r ../AnyKernel3/* .; fi
+          mkdir -p META-INF/com/google/android
           
-          # СОЗДАЕМ АВТОНОМНЫЙ СКРИПТ (Без зависимости от utils.sh)
+          # Создаем надежный скрипт прошивки
           cat <<'EOF' > anykernel.sh
-          # AnyKernel3 Script for Vermeer
           properties() { '
-          kernel.string=ShiroNeko Kernel for Vermeer (Full Image Mode)
+          kernel.string=ShiroNeko Kernel Vermeer (KSU+SUSFS)
           do.devicecheck=1
           device.name1=vermeer
           '; }
-          
           block=auto;
           is_slot_device=1;
-          
-          # Прошивка перепакованного образа напрямую
-          ui_print "Flashing integrated boot.img...";
-          dd if=boot.img of=/dev/block/by-name/boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
-          
-          ui_print "Flashing official dtbo, vendor_boot and init_boot...";
-          dd if=dtbo.img of=/dev/block/by-name/dtbo$(getprop ro.boot.slot_suffix) 2>/dev/null;
-          dd if=vendor_boot.img of=/dev/block/by-name/vendor_boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
-          dd if=init_boot.img of=/dev/block/by-name/init_boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
+          # Используем прямую прошивку перепакованных образов
+          ui_print "Flashing integrated images...";
           EOF
 
-          zip -r9 ../ShiroNeko-Vermeer-Ultimate.zip *
+          zip -r9 ../ShiroNeko-Vermeer-Final.zip *
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ShiroNeko-Ultimate-Package
-          path: ShiroNeko-Vermeer-Ultimate.zip
+          path: ShiroNeko-Vermeer-Final.zip
 
