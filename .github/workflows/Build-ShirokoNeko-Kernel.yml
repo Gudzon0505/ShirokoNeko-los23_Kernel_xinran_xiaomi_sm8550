@@ -1,6 +1,7 @@
+
 name: Build ShiroNeko Vermeer Kernel
 on:
-  workflow_dispatch:
+  workflow_dispatch: # Запуск вручную
 
 jobs:
   build:
@@ -29,38 +30,37 @@ jobs:
 
       - name: Build with Kleaf
         run: |
-          # Гарантируем наличие файла WORKSPACE в текущей директории
-          if [ ! -f WORKSPACE ] && [ ! -f WORKSPACE.bazel ]; then
-            touch WORKSPACE
-          fi
+          # 1. Гарантируем наличие файла WORKSPACE для Bazel
+          if [ ! -f WORKSPACE ]; then touch WORKSPACE; fi
           
-          # Запуск сборки без лишних системных флагов
-          # Используем таргет kalama_dist для SM8550
-          bazel build --config=fast //common:kalama_dist
+          # 2. Запускаем сборку без использования неопределенных конфигов вроде 'fast'
+          # Мы собираем напрямую цель kalama_dist
+          bazel build //common:kalama_dist
 
       - name: Package AnyKernel3
         run: |
           mkdir -p output
           
-          # Поиск собранного образа Image
+          # Поиск собранного ядра в дереве Bazel
+          # Kleaf может положить Image в разные папки, поэтому используем find
           find bazel-bin -name "Image" -exec cp {} output/ \;
           find bazel-bin -name "dtbo.img" -exec cp {} output/ \; || echo "DTBO не найден"
           
-          # Проверка наличия AnyKernel3 и упаковка
+          # Копируем AnyKernel3 из твоего репозитория
           if [ -d "AnyKernel3" ]; then
             cp -r AnyKernel3/* output/
           else
-            echo "Ошибка: папка AnyKernel3 не найдена!"
+            echo "Критическая ошибка: папка AnyKernel3 не найдена!"
             exit 1
           fi
           
+          # Создаем прошивочный архив
           cd output
           rm -rf .git*
-          zip -r9 ../ShiroNeko-Vermeer-A16-SuKiSu-SUSFS.zip *
+          zip -r9 ../ShiroNeko-Vermeer-A16-KSU-SUSFS.zip *
 
       - name: Upload Kernel Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ShiroNeko-Vermeer-Kernel
-          path: ShiroNeko-Vermeer-A16-SuKiSu-SUSFS.zip
-
+          path: ShiroNeko-Vermeer-A16-KSU-SUSFS.zip
