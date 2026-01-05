@@ -18,13 +18,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 zip wget curl rsync lld-15 llvm-15 clang-15 dwarves
           
-          # Создаем бинарную директорию и жесткие ссылки
+          # Создаем жесткие ссылки для всех инструментов LLVM
           mkdir -p $GITHUB_WORKSPACE/bin
-          for tool in clang ld.lld llvm-nm llvm-ar llvm-objcopy llvm-objdump llvm-strip llvm-readelf; do
+          for tool in clang ld.lld llvm-nm llvm-ar llvm-objcopy llvm-objdump llvm-strip llvm-readelf llvm-size; do
             ln -sf /usr/bin/${tool}-15 $GITHUB_WORKSPACE/bin/${tool}
           done
           
-          # Добавляем в PATH
           echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
 
       - name: Build Kernel
@@ -32,13 +31,13 @@ jobs:
           export ARCH=arm64
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           
-          # Применяем конфиг
+          # Применяем конфигурацию Poco F6 Pro
           make O=out Xinran_PocoF6Pro_defconfig
           
-          # Отключаем BTF для стабильности
+          # Принудительно отключаем BTF для обхода ошибки pahole
           scripts/config --file out/.config --disable CONFIG_DEBUG_INFO_BTF
           
-          # Запуск сборки с принудительным указанием всех инструментов LLVM
+          # Запуск сборки с использованием полной связки LLVM
           make -j$(nproc --all) O=out \
             CC=clang \
             LD=ld.lld \
@@ -48,22 +47,29 @@ jobs:
             OBJDUMP=llvm-objdump \
             STRIP=llvm-strip \
             READELF=llvm-readelf \
+            OBJSIZE=llvm-size \
             LLVM=1 \
             LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
 
-      - name: Package AnyKernel3 (GKI Direct Flash Fix)
+      - name: Package AnyKernel3 (GKI Simple Flash)
         run: |
           mkdir -p output
-          cp out/arch/arm64/boot/Image output/
+          # Проверяем наличие ядра перед упаковкой
+          if [ -f out/arch/arm64/boot/Image ]; then
+            cp out/arch/arm64/boot/Image output/
+          else
+            echo "Ошибка: Файл Image не найден!"
+            exit 1
+          fi
           
-          # Копируем базовые файлы AnyKernel3 если они есть
+          # Копируем базовую структуру AnyKernel3
           if [ -d "AnyKernel3" ]; then
             cp -r AnyKernel3/* output/
           fi
 
-          # СОЗДАЕМ ИСПРАВЛЕННЫЙ СКРИПТ (Фикс "No ramdisk found")
+          # ПЕРЕЗАПИСЫВАЕМ СКРИПТ ДЛЯ ANDROID 16 (GKI FIX)
           cat <<'EOF' > output/anykernel.sh
           # AnyKernel3 Deployment Script
           properties() { '
@@ -71,13 +77,11 @@ jobs:
           do.devicecheck=1
           do.modules=0
           do.systemless=1
-          do.cleanup=1
-          do.cleancontainer=1
           device.name1=vermeer
           supported.versions=13, 14, 15, 16
           '; }
 
-          # Настройка GKI: прошивка только Image в boot раздел
+          # Настройка для GKI устройств
           block=auto;
           is_slot_device=1;
           ramdisk_compression=auto;
@@ -85,17 +89,18 @@ jobs:
 
           . binary/utils.sh;
 
-          # ФИКС: Вместо распаковки (split_boot), сразу подменяем Image
-          dump_boot; 
+          # Метод прямой записи образа без распаковки ramdisk
+          split_boot; 
+          replace_kernel; 
           write_boot;
           EOF
 
           cd output
-          zip -r9 ../ShiroNeko-Vermeer-Ready.zip *
+          zip -r9 ../ShiroNeko-Vermeer-A16-Ready.zip *
 
-      - name: Upload
+      - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
           name: ShiroNeko-Vermeer-Kernel
-          path: ShiroNeko-Vermeer-Ready.zip
+          path: ShiroNeko-Vermeer-A16-Ready.zip
 
