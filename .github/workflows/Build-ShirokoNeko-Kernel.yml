@@ -29,24 +29,24 @@ jobs:
 
       - name: Build with Kleaf
         run: |
-          # Убеждаемся, что мы в корне, где лежат BUILD.bazel и WORKSPACE
-          # Используем системный bazel с флагом --workspace_rc=false для чистоты
-          bazel --stacktrace build --config=fast //common:kalama_dist
+          # Принудительно используем Bazel из корня репозитория
+          # Флаги перенесены в правильные места
+          bazel build --config=fast --stacktrace //common:kalama_dist
 
       - name: Package AnyKernel3
         run: |
-          # Создаем папку для сборки
+          # Создаем папку для артефактов
           mkdir -p output
           
-          # Копируем результаты сборки. Bazel кладет их в bazel-bin
-          # Используем find, чтобы найти Image, если путь в bazel-bin изменится
-          find bazel-bin -name "Image" -exec cp {} output/ \;
-          find bazel-bin -name "dtbo.img" -exec cp {} output/ \; || echo "DTBO не найден"
+          # Умный поиск Image и dtbo.img в результатах Bazel
+          # Kleaf генерирует сложную структуру, поэтому используем find
+          find bazel-bin/common -name "Image" -exec cp {} output/ \;
+          find bazel-bin/common -name "dtbo.img" -exec cp {} output/ \; || echo "DTBO не найден"
           
-          # Копируем AnyKernel3
+          # Копируем AnyKernel3 из корня
           cp -r AnyKernel3/* output/
           
-          # Собираем ZIP
+          # Создаем финальный ZIP
           cd output
           rm -rf .git*
           zip -r9 ../ShiroNeko-Vermeer-A16-SuKiSu-SUSFS.zip *
