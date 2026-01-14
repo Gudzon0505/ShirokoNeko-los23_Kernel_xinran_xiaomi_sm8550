@@ -12,7 +12,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-
       - name: Checkout source
         uses: actions/checkout@v4
         with:
@@ -35,22 +34,12 @@ jobs:
             fi
           done
           echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
-          export PATH=$GITHUB_WORKSPACE/bin:$PATH
-
-      - name: Show environment
-        run: |
-          echo "ARCH=${ARCH}"
-          echo "OUT_DIR=${OUT_DIR}"
-          echo "DEFCONFIG=${DEFCONFIG}"
-          clang --version || true
-          aarch64-linux-gnu-gcc --version || true
 
       - name: Configure kernel defconfig and options
         run: |
           export ARCH=${ARCH}
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           make O=${OUT_DIR} ${DEFCONFIG}
-          # Если нужно включить опции через scripts/config, раскомментируй и адаптируй
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_INIT_BOOT || true
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_SECURITY_SELINUX || true
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_KSU || true
@@ -60,40 +49,22 @@ jobs:
         run: |
           export ARCH=${ARCH}
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
-          # CROSS_COMPILE оставлен для вспомогательных утилит; clang используется как CC
-          make -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image.gz dtbs dtboimg || make -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image dtbs dtboimg
+          make -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image.gz dtbs dtboimg || \
+          make -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image dtbs dtboimg
 
-      - name: Prepare ramdisk and cmdline placeholders
+      - name: Prepare ramdisk placeholder
         run: |
           mkdir -p build_artifacts
-          # --- ВАЖНО ---
-          # Подготовь ramdisk.img совместимый с LineageOS 23 (из официального boot.img или из сборки LOS).
-          # Варианты:
-          # 1) Извлечь ramdisk из официального boot.img и положить в repo по пути tools/ramdisk.img
-          # 2) Подготовить minimal ramdisk и положить в repo
-          #
-          # Если у тебя есть официальный boot.img, распакуй локально и положи ramdisk.img в repo, либо
-          # скачай его в workflow и распакуй (ниже пример, закомментирован).
-          #
-          # Пример (раскомментируй и адаптируй, если хочешь скачивать официальный boot.img):
-          # BASE_URL="https://mirrorbits.lineageos.org/full/vermeer/20260103"
-          # wget -q $BASE_URL/boot.img -O build_artifacts/official_boot.img
-          # # Используй abootimg/mkbootimg_tools чтобы извлечь ramdisk (внешний шаг)
-          #
-          echo "Положи ramdisk.img в repo по пути tools/ramdisk.img или обнови этот шаг."
+          echo "Place a compatible ramdisk at tools/ramdisk.img before running this workflow." || true
 
-      - name: Create Image.gz-dtb if needed
+      - name: Create Image.gz-dtb and collect dtbo
         run: |
           mkdir -p build_artifacts
-          KIMG=${OUT_DIR}/arch/arm64/boot/Image.gz
-          DTB_DIR=${OUT_DIR}/arch/arm64/boot/dts
-          if [ -f "${KIMG}" ] && [ -d "${DTB_DIR}" ]; then
-            cat ${KIMG} ${DTB_DIR}/*.dtb > build_artifacts/Image.gz-dtb || true
+          if [ -f ${OUT_DIR}/arch/arm64/boot/Image.gz ]; then
+            cat ${OUT_DIR}/arch/arm64/boot/Image.gz ${OUT_DIR}/arch/arm64/boot/dts/*.dtb > build_artifacts/Image.gz-dtb || true
           else
-            # fallback to Image
             cp ${OUT_DIR}/arch/arm64/boot/Image build_artifacts/Image || true
           fi
-          # copy dtbo if built
           if [ -f ${OUT_DIR}/arch/arm64/boot/dtbo.img ]; then
             cp ${OUT_DIR}/arch/arm64/boot/dtbo.img build_artifacts/dtbo.img
           fi
@@ -102,16 +73,11 @@ jobs:
         run: |
           set -e
           cd build_artifacts
-          # Параметры ниже нужно заменить на реальные значения из официальной сборки LOS:
-          # - ramdisk: путь к ramdisk.img (из официального boot.img или из сборки LOS)
-          # - cmdline: cmdline из официального boot.img (важно для корректной загрузки)
-          # - base и pagesize: значения из официального boot.img (обычно base 0x40000000, pagesize 4096)
           RAMDISK_PATH="${GITHUB_WORKSPACE}/tools/ramdisk.img"
           if [ ! -f "${RAMDISK_PATH}" ]; then
             echo "ERROR: ramdisk.img not found at ${RAMDISK_PATH}. Place compatible ramdisk there." >&2
             exit 1
           fi
-          KERNEL_IMAGE=""
           if [ -f Image.gz-dtb ]; then
             KERNEL_IMAGE="Image.gz-dtb"
           elif [ -f Image ]; then
@@ -120,23 +86,17 @@ jobs:
             echo "ERROR: kernel image not found" >&2
             exit 1
           fi
-          # Заменить CMDLINE на значение из официального boot.img
           CMDLINE="console=ttyMSM0,115200n8 androidboot.hardware=qcom"
           BASE="0x40000000"
           PAGESIZE="4096"
           mkbootimg --kernel ${KERNEL_IMAGE} --ramdisk ${RAMDISK_PATH} --cmdline "${CMDLINE}" --base ${BASE} --pagesize ${PAGESIZE} -o boot.img
-          # Если требуется avb footer, генерировать vbmeta отдельно (требует ключей). Для теста можно использовать инструкцию fastboot --disable-verity --disable-verification.
 
       - name: Prepare AnyKernel3 package
         run: |
-          # Клонируем шаблон AnyKernel3 в workspace/anykernel (или используй свой)
           rm -rf anykernel
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3 anykernel || true
-          # Копируем артефакты в anykernel
           cp build_artifacts/boot.img anykernel/boot.img || true
           cp build_artifacts/dtbo.img anykernel/dtbo.img || true
-          # Если нужно, положи vendor_boot/init_boot в anykernel
-          # zip пакет
           cd anykernel
           zip -r9 ../ShiroNeko-AnyKernel.zip . -x .git\* || true
           cd ..
@@ -150,7 +110,6 @@ jobs:
             build_artifacts/dtbo.img
             ShiroNeko-AnyKernel.zip
             ${OUT_DIR}/.config
-            ${OUT_DIR}/build.log
 
       - name: Success message
         run: |
