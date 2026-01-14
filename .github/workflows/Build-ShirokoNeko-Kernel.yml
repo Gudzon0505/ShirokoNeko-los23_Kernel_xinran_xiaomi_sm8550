@@ -7,6 +7,7 @@ env:
   OUT_DIR: out
   DEFCONFIG: Xinran_PocoF6Pro_defconfig
   CLANG_VER: 15
+  # Опционально: укажи URL официального boot.img (LineageOS 23) чтобы workflow извлёк ramdisk автоматически
   OFFICIAL_BOOT_URL: ''
 
 jobs:
@@ -26,7 +27,9 @@ jobs:
           sudo apt-get install -y \
             bc bison build-essential flex git libelf-dev libssl-dev python3 python3-pip zip wget rsync dwarves \
             clang-${{ env.CLANG_VER }} lld-${{ env.CLANG_VER }} gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            mkbootimg abootimg device-tree-compiler cpio unzip zstd lz4 pkg-config
+            mkbootimg abootimg device-tree-compiler cpio unzip zstd lz4 pkg-config \
+            zlib1g-dev liblz4-dev libzstd-dev libncurses-dev python3-distutils
+          # Установлены dev-библиотеки для корректной линковки libbpf/resolve_btfids
 
       - name: Prepare workspace bin and clang wrappers
         run: |
@@ -58,22 +61,27 @@ jobs:
           aarch64-linux-gnu-gcc --version || true
           python3 --version
 
-      - name: Configure kernel defconfig and options
+      - name: Configure kernel defconfig and options (non-interactive)
         run: |
           export ARCH=${ARCH}
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
+          # Применяем defconfig
           make O=${OUT_DIR} ${DEFCONFIG}
+          # Принудительно включаем критичные опции для Android 16 / LOS23
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_INIT_BOOT || true
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_SECURITY_SELINUX || true
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_KSU || true
-          make -C . O=${OUT_DIR} olddefconfig
+          # Автоматически принимаем новые опции без интерактива
+          yes "" | make -C . O=${OUT_DIR} olddefconfig
 
       - name: Build kernel, dtbs and dtbo with verbose logging
         run: |
           export ARCH=${ARCH}
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           set -o pipefail
+          # Убедимся, что defconfig применён корректно
           make -j1 O=${OUT_DIR} ${DEFCONFIG}
+          # Собираем с подробным выводом; лог сохраняем в out/build.log
           make V=1 -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image.gz dtbs dtboimg 2>&1 | tee ${OUT_DIR}/build.log
           if [ "${PIPESTATUS[0]}" -ne 0 ]; then
             echo "Kernel build failed. See ${OUT_DIR}/build.log" >&2
@@ -143,6 +151,7 @@ jobs:
             echo "ERROR: kernel image not found" >&2
             exit 1
           fi
+          # --- ВАЖНО: подставь CMDLINE, BASE и PAGESIZE из официального boot.img если знаешь ---
           CMDLINE="console=ttyMSM0,115200n8 androidboot.hardware=qcom"
           BASE="0x40000000"
           PAGESIZE="4096"
