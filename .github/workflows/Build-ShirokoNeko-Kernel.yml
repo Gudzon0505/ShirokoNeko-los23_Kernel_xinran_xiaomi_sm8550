@@ -1,89 +1,157 @@
-
 name: Build ShiroNeko Vermeer PRO
 on:
   workflow_dispatch:
+
+env:
+  ARCH: arm64
+  OUT_DIR: out
+  DEFCONFIG: Xinran_PocoF6Pro_defconfig
+  CLANG_VER: 15
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Source
+
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
           fetch-depth: 1
 
-      - name: Install Build Tools
+      - name: Install system packages and Python tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 zip wget rsync lld-15 clang-15 dwarves
+          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 python3-pip zip wget rsync dwarves
+          sudo apt-get install -y clang-${{ env.CLANG_VER }} lld-${{ env.CLANG_VER }} gcc-aarch64-linux-gnu mkbootimg
+          pip3 install avbtool
+
+      - name: Prepare clang wrappers
+        run: |
           mkdir -p $GITHUB_WORKSPACE/bin
           for tool in clang ld.lld llvm-nm llvm-ar llvm-objcopy llvm-objdump llvm-strip llvm-readelf llvm-size; do
-            ln -sf /usr/bin/${tool}-15 $GITHUB_WORKSPACE/bin/${tool}
+            if [ -x /usr/bin/${tool}-${{ env.CLANG_VER }} ]; then
+              ln -sf /usr/bin/${tool}-${{ env.CLANG_VER }} $GITHUB_WORKSPACE/bin/${tool}
+            fi
           done
           echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
-
-      - name: Build Kernel with Integrated KSU
-        run: |
-          export ARCH=arm64
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
-          make O=out Xinran_PocoF6Pro_defconfig
-          # Вшиваем KernelSU (Root) прямо в код ядра (Fix для Android 16)
-          scripts/config --file out/.config --enable CONFIG_KSU
-          scripts/config --file out/.config --enable CONFIG_KSU_SUSFS
-          scripts/config --file out/.config --enable CONFIG_SUSFS
-          scripts/config --file out/.config --disable CONFIG_DEBUG_INFO_BTF
-          make -j$(nproc --all) O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 CROSS_COMPILE=aarch64-linux-gnu-
 
-      - name: Create Flash Package (No Dependencies)
+      - name: Show environment
         run: |
-          mkdir -p package/META-INF/com/google/android
-          cp out/arch/arm64/boot/Image package/Image
-          
-          # Берем официальные разделы LineageOS (согласно твоему скриншоту 284)
-          cd package
-          BASE_URL="https://mirrorbits.lineageos.org/full/vermeer/20260103"
-          wget -q $BASE_URL/boot.img
-          wget -q $BASE_URL/dtbo.img
-          wget -q $BASE_URL/vendor_boot.img
-          wget -q $BASE_URL/init_boot.img
-          
-          # СОЗДАЕМ АВТОНОМНЫЙ СКРИПТ (Без зависимостей от binary/utils.sh)
-          cat <<'EOF' > anykernel.sh
-          properties() { '
-          kernel.string=ShiroNeko Kernel Vermeer (GKI PRO)
-          do.devicecheck=1
-          device.name1=vermeer
-          '; }
-          block=auto;
-          is_slot_device=1;
-          
-          ui_print " "
-          ui_print "--- SHIRONEKO KERNEL INSTALLER ---"
-          ui_print "Target: Poco F6 Pro (vermeer)"
-          ui_print "Android: 16 (GKI 2.0)"
-          
-          ui_print "Flashing Kernel Image to Boot..."
-          dd if=Image of=/dev/block/by-name/boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
-          
-          ui_print "Updating GKI Partitions (dtbo/vendor/init)..."
-          dd if=dtbo.img of=/dev/block/by-name/dtbo$(getprop ro.boot.slot_suffix) 2>/dev/null;
-          dd if=vendor_boot.img of=/dev/block/by-name/vendor_boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
-          dd if=init_boot.img of=/dev/block/by-name/init_boot$(getprop ro.boot.slot_suffix) 2>/dev/null;
-          
-          ui_print " "
-          ui_print "Installation Success! Root (KSU) is integrated."
-          ui_print "Please reboot your device."
-          EOF
+          echo "ARCH=${ARCH}"
+          echo "OUT_DIR=${OUT_DIR}"
+          echo "DEFCONFIG=${DEFCONFIG}"
+          clang --version || true
+          aarch64-linux-gnu-gcc --version || true
 
-          # Бинарник-заглушка для запуска в Kernel Flasher
-          printf "#!/sbin/sh\nexit 0" > META-INF/com/google/android/update-binary
-          chmod +x META-INF/com/google/android/update-binary
-          
-          zip -r9 ../ShiroNeko-Final-PRO.zip *
+      - name: Configure kernel defconfig and options
+        run: |
+          export ARCH=${ARCH}
+          export PATH=$GITHUB_WORKSPACE/bin:$PATH
+          make O=${OUT_DIR} ${DEFCONFIG}
+          # Если нужно включить опции через scripts/config, раскомментируй и адаптируй
+          scripts/config --file ${OUT_DIR}/.config --enable CONFIG_INIT_BOOT || true
+          scripts/config --file ${OUT_DIR}/.config --enable CONFIG_SECURITY_SELINUX || true
+          scripts/config --file ${OUT_DIR}/.config --enable CONFIG_KSU || true
+          make -C . O=${OUT_DIR} olddefconfig
 
-      - name: Upload Artifact
+      - name: Build kernel, dtbs and dtbo
+        run: |
+          export ARCH=${ARCH}
+          export PATH=$GITHUB_WORKSPACE/bin:$PATH
+          # CROSS_COMPILE оставлен для вспомогательных утилит; clang используется как CC
+          make -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image.gz dtbs dtboimg || make -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image dtbs dtboimg
+
+      - name: Prepare ramdisk and cmdline placeholders
+        run: |
+          mkdir -p build_artifacts
+          # --- ВАЖНО ---
+          # Подготовь ramdisk.img совместимый с LineageOS 23 (из официального boot.img или из сборки LOS).
+          # Варианты:
+          # 1) Извлечь ramdisk из официального boot.img и положить в repo по пути tools/ramdisk.img
+          # 2) Подготовить minimal ramdisk и положить в repo
+          #
+          # Если у тебя есть официальный boot.img, распакуй локально и положи ramdisk.img в repo, либо
+          # скачай его в workflow и распакуй (ниже пример, закомментирован).
+          #
+          # Пример (раскомментируй и адаптируй, если хочешь скачивать официальный boot.img):
+          # BASE_URL="https://mirrorbits.lineageos.org/full/vermeer/20260103"
+          # wget -q $BASE_URL/boot.img -O build_artifacts/official_boot.img
+          # # Используй abootimg/mkbootimg_tools чтобы извлечь ramdisk (внешний шаг)
+          #
+          echo "Положи ramdisk.img в repo по пути tools/ramdisk.img или обнови этот шаг."
+
+      - name: Create Image.gz-dtb if needed
+        run: |
+          mkdir -p build_artifacts
+          KIMG=${OUT_DIR}/arch/arm64/boot/Image.gz
+          DTB_DIR=${OUT_DIR}/arch/arm64/boot/dts
+          if [ -f "${KIMG}" ] && [ -d "${DTB_DIR}" ]; then
+            cat ${KIMG} ${DTB_DIR}/*.dtb > build_artifacts/Image.gz-dtb || true
+          else
+            # fallback to Image
+            cp ${OUT_DIR}/arch/arm64/boot/Image build_artifacts/Image || true
+          fi
+          # copy dtbo if built
+          if [ -f ${OUT_DIR}/arch/arm64/boot/dtbo.img ]; then
+            cp ${OUT_DIR}/arch/arm64/boot/dtbo.img build_artifacts/dtbo.img
+          fi
+
+      - name: Build boot.img using mkbootimg
+        run: |
+          set -e
+          cd build_artifacts
+          # Параметры ниже нужно заменить на реальные значения из официальной сборки LOS:
+          # - ramdisk: путь к ramdisk.img (из официального boot.img или из сборки LOS)
+          # - cmdline: cmdline из официального boot.img (важно для корректной загрузки)
+          # - base и pagesize: значения из официального boot.img (обычно base 0x40000000, pagesize 4096)
+          RAMDISK_PATH="${GITHUB_WORKSPACE}/tools/ramdisk.img"
+          if [ ! -f "${RAMDISK_PATH}" ]; then
+            echo "ERROR: ramdisk.img not found at ${RAMDISK_PATH}. Place compatible ramdisk there." >&2
+            exit 1
+          fi
+          KERNEL_IMAGE=""
+          if [ -f Image.gz-dtb ]; then
+            KERNEL_IMAGE="Image.gz-dtb"
+          elif [ -f Image ]; then
+            KERNEL_IMAGE="Image"
+          else
+            echo "ERROR: kernel image not found" >&2
+            exit 1
+          fi
+          # Заменить CMDLINE на значение из официального boot.img
+          CMDLINE="console=ttyMSM0,115200n8 androidboot.hardware=qcom"
+          BASE="0x40000000"
+          PAGESIZE="4096"
+          mkbootimg --kernel ${KERNEL_IMAGE} --ramdisk ${RAMDISK_PATH} --cmdline "${CMDLINE}" --base ${BASE} --pagesize ${PAGESIZE} -o boot.img
+          # Если требуется avb footer, генерировать vbmeta отдельно (требует ключей). Для теста можно использовать инструкцию fastboot --disable-verity --disable-verification.
+
+      - name: Prepare AnyKernel3 package
+        run: |
+          # Клонируем шаблон AnyKernel3 в workspace/anykernel (или используй свой)
+          rm -rf anykernel
+          git clone --depth 1 https://github.com/osm0sis/AnyKernel3 anykernel || true
+          # Копируем артефакты в anykernel
+          cp build_artifacts/boot.img anykernel/boot.img || true
+          cp build_artifacts/dtbo.img anykernel/dtbo.img || true
+          # Если нужно, положи vendor_boot/init_boot в anykernel
+          # zip пакет
+          cd anykernel
+          zip -r9 ../ShiroNeko-AnyKernel.zip . -x .git\* || true
+          cd ..
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ShiroNeko-Perfect-Bundle
-          path: ShiroNeko-Final-PRO.zip
+          name: ShiroNeko-artifacts
+          path: |
+            build_artifacts/boot.img
+            build_artifacts/dtbo.img
+            ShiroNeko-AnyKernel.zip
+            ${OUT_DIR}/.config
+            ${OUT_DIR}/build.log
+
+      - name: Success message
+        run: |
+          echo "Build finished. Download artifacts from Actions. Test boot.img via fastboot."
