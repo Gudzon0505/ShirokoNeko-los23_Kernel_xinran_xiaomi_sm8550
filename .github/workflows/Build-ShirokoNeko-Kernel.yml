@@ -7,7 +7,6 @@ env:
   OUT_DIR: out
   DEFCONFIG: Xinran_PocoF6Pro_defconfig
   CLANG_VER: 15
-  # Опционально: укажи URL официального boot.img (LineageOS 23) чтобы workflow извлёк ramdisk автоматически
   OFFICIAL_BOOT_URL: ''
 
 jobs:
@@ -27,9 +26,7 @@ jobs:
           sudo apt-get install -y \
             bc bison build-essential flex git libelf-dev libssl-dev python3 python3-pip zip wget rsync dwarves \
             clang-${{ env.CLANG_VER }} lld-${{ env.CLANG_VER }} gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            mkbootimg abootimg device-tree-compiler cpio unzip zstd lz4
-          # ensure basic tools available
-          sudo apt-get install -y pkg-config
+            mkbootimg abootimg device-tree-compiler cpio unzip zstd lz4 pkg-config
 
       - name: Prepare workspace bin and clang wrappers
         run: |
@@ -39,10 +36,8 @@ jobs:
               ln -sf /usr/bin/${tool}-${{ env.CLANG_VER }} $GITHUB_WORKSPACE/bin/${tool}
             fi
           done
-          # add aarch64 toolchain to PATH if needed
-          echo "/usr/bin" >> $GITHUB_PATH
           echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
-          export PATH=$GITHUB_WORKSPACE/bin:$PATH
+          echo "/usr/bin" >> $GITHUB_PATH
 
       - name: Get avbtool from AOSP and create wrapper
         run: |
@@ -68,7 +63,6 @@ jobs:
           export ARCH=${ARCH}
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           make O=${OUT_DIR} ${DEFCONFIG}
-          # Включаем критичные опции для Android 16 / LOS23 (адаптируй при необходимости)
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_INIT_BOOT || true
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_SECURITY_SELINUX || true
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_KSU || true
@@ -79,9 +73,7 @@ jobs:
           export ARCH=${ARCH}
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           set -o pipefail
-          # ensure defconfig applied
           make -j1 O=${OUT_DIR} ${DEFCONFIG}
-          # build with verbose output; save log
           make V=1 -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image.gz dtbs dtboimg 2>&1 | tee ${OUT_DIR}/build.log
           if [ "${PIPESTATUS[0]}" -ne 0 ]; then
             echo "Kernel build failed. See ${OUT_DIR}/build.log" >&2
@@ -151,7 +143,6 @@ jobs:
             echo "ERROR: kernel image not found" >&2
             exit 1
           fi
-          # --- ВАЖНО: подставь CMDLINE, BASE и PAGESIZE из официального boot.img если знаешь ---
           CMDLINE="console=ttyMSM0,115200n8 androidboot.hardware=qcom"
           BASE="0x40000000"
           PAGESIZE="4096"
