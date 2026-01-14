@@ -15,19 +15,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-      - name: Checkout source
+      - name: Checkout source (full history + submodules)
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Install system packages and Python tools
+      - name: Install system packages and tools
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             bc bison build-essential flex git libelf-dev libssl-dev python3 python3-pip zip wget rsync dwarves \
-            clang-${{ env.CLANG_VER }} lld-${{ env.CLANG_VER }} gcc-aarch64-linux-gnu mkbootimg abootimg device-tree-compiler
-          # avbtool не на PyPI — клонируем AOSP external/avb ниже и создаём wrapper
+            clang-${{ env.CLANG_VER }} lld-${{ env.CLANG_VER }} gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            mkbootimg abootimg device-tree-compiler cpio unzip zstd lz4
+          # ensure basic tools available
+          sudo apt-get install -y pkg-config
 
       - name: Prepare workspace bin and clang wrappers
         run: |
@@ -37,6 +39,8 @@ jobs:
               ln -sf /usr/bin/${tool}-${{ env.CLANG_VER }} $GITHUB_WORKSPACE/bin/${tool}
             fi
           done
+          # add aarch64 toolchain to PATH if needed
+          echo "/usr/bin" >> $GITHUB_PATH
           echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
 
@@ -70,16 +74,15 @@ jobs:
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_KSU || true
           make -C . O=${OUT_DIR} olddefconfig
 
-      - name: Build kernel, dtbs and dtbo with logging
+      - name: Build kernel, dtbs and dtbo with verbose logging
         run: |
           export ARCH=${ARCH}
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           set -o pipefail
-          # Сначала убедимся, что defconfig применён
+          # ensure defconfig applied
           make -j1 O=${OUT_DIR} ${DEFCONFIG}
-          # Собираем с подробным выводом; лог сохраняем в out/build.log
+          # build with verbose output; save log
           make V=1 -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image.gz dtbs dtboimg 2>&1 | tee ${OUT_DIR}/build.log
-          # Если предыдущая команда упала, exit с кодом 1
           if [ "${PIPESTATUS[0]}" -ne 0 ]; then
             echo "Kernel build failed. See ${OUT_DIR}/build.log" >&2
             exit 1
@@ -88,17 +91,14 @@ jobs:
       - name: Obtain or extract ramdisk (from OFFICIAL_BOOT_URL or repo)
         run: |
           mkdir -p build_artifacts tools
-          # Если в репо уже есть tools/ramdisk.img — используем его
           if [ -f tools/ramdisk.img ]; then
             cp tools/ramdisk.img build_artifacts/ramdisk.img
             echo "Using ramdisk from tools/ramdisk.img"
           elif [ -n "${{ env.OFFICIAL_BOOT_URL }}" ]; then
             echo "Downloading official boot.img from OFFICIAL_BOOT_URL"
             wget -q "${{ env.OFFICIAL_BOOT_URL }}" -O build_artifacts/official_boot.img
-            # извлекаем ramdisk с помощью abootimg
             if command -v abootimg >/dev/null 2>&1; then
               abootimg -x build_artifacts/official_boot.img || true
-              # abootimg может распаковать ramdisk.cpio.gz или ramdisk.img
               if [ -f ramdisk.cpio.gz ]; then
                 mv ramdisk.cpio.gz build_artifacts/ramdisk.img
               elif [ -f ramdisk.img ]; then
@@ -120,7 +120,6 @@ jobs:
         run: |
           mkdir -p build_artifacts
           if [ -f ${OUT_DIR}/arch/arm64/boot/Image.gz ]; then
-            # объединяем kernel + dtb (если требуется)
             if ls ${OUT_DIR}/arch/arm64/boot/dts/*.dtb >/dev/null 2>&1; then
               cat ${OUT_DIR}/arch/arm64/boot/Image.gz ${OUT_DIR}/arch/arm64/boot/dts/*.dtb > build_artifacts/Image.gz-dtb || true
             fi
@@ -131,6 +130,7 @@ jobs:
           if [ -f ${OUT_DIR}/arch/arm64/boot/dtbo.img ]; then
             cp ${OUT_DIR}/arch/arm64/boot/dtbo.img build_artifacts/dtbo.img
           fi
+          ls -lah build_artifacts || true
 
       - name: Build boot.img using mkbootimg
         run: |
@@ -162,15 +162,13 @@ jobs:
         run: |
           rm -rf anykernel
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3 anykernel || true
-          # Копируем артефакты в anykernel
           cp build_artifacts/boot.img anykernel/boot.img || true
           cp build_artifacts/dtbo.img anykernel/dtbo.img || true
-          # При необходимости добавь vendor_boot/init_boot в anykernel перед упаковкой
           cd anykernel
           zip -r9 ../ShiroNeko-AnyKernel.zip . -x .git\* || true
           cd ..
 
-      - name: Upload artifacts
+      - name: Upload artifacts (always)
         uses: actions/upload-artifact@v4
         with:
           name: ShiroNeko-artifacts
@@ -181,7 +179,18 @@ jobs:
             ${OUT_DIR}/.config
             ${OUT_DIR}/build.log
 
+      - name: Print short build log tail
+        if: always()
+        run: |
+          echo "=== Build log tail ==="
+          if [ -f ${OUT_DIR}/build.log ]; then
+            tail -n 200 ${OUT_DIR}/build.log || true
+          else
+            echo "No build.log found"
+          fi
+
       - name: Success message
+        if: success()
         run: |
           echo "Build finished. Artifacts uploaded. Test boot.img via fastboot: fastboot flash boot boot.img"
           echo "If device uses AVB, test with: fastboot --disable-verity --disable-verification flash vbmeta vbmeta.img (manual step)."
