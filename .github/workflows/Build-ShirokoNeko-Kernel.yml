@@ -26,7 +26,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bc bison build-essential flex git libelf-dev libssl-dev python3 python3-pip zip wget rsync dwarves \
-            clang-${{ env.CLANG_VER }} lld-${{ env.CLANG_VER }} gcc-aarch64-linux-gnu mkbootimg abootimg
+            clang-${{ env.CLANG_VER }} lld-${{ env.CLANG_VER }} gcc-aarch64-linux-gnu mkbootimg abootimg device-tree-compiler
           # avbtool не на PyPI — клонируем AOSP external/avb ниже и создаём wrapper
 
       - name: Prepare workspace bin and clang wrappers
@@ -43,7 +43,6 @@ jobs:
       - name: Get avbtool from AOSP and create wrapper
         run: |
           git clone --depth 1 https://android.googlesource.com/platform/external/avb avb || true
-          # wrapper запускает avbtool.py из клонированного репо
           cat > $GITHUB_WORKSPACE/bin/avbtool <<'EOF'
           #!/usr/bin/env bash
           python3 "$(dirname "$0")/../avb/avbtool.py" "$@"
@@ -65,19 +64,26 @@ jobs:
           export ARCH=${ARCH}
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           make O=${OUT_DIR} ${DEFCONFIG}
-          # Включаем критичные опции для Android 16 / LOS23
+          # Включаем критичные опции для Android 16 / LOS23 (адаптируй при необходимости)
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_INIT_BOOT || true
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_SECURITY_SELINUX || true
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_KSU || true
           make -C . O=${OUT_DIR} olddefconfig
 
-      - name: Build kernel, dtbs and dtbo
+      - name: Build kernel, dtbs and dtbo with logging
         run: |
           export ARCH=${ARCH}
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
-          # CC=clang, LD=ld.lld; CROSS_COMPILE left for helper tools
-          make -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image.gz dtbs dtboimg || \
-          make -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image dtbs dtboimg
+          set -o pipefail
+          # Сначала убедимся, что defconfig применён
+          make -j1 O=${OUT_DIR} ${DEFCONFIG}
+          # Собираем с подробным выводом; лог сохраняем в out/build.log
+          make V=1 -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image.gz dtbs dtboimg 2>&1 | tee ${OUT_DIR}/build.log
+          # Если предыдущая команда упала, exit с кодом 1
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+            echo "Kernel build failed. See ${OUT_DIR}/build.log" >&2
+            exit 1
+          fi
 
       - name: Obtain or extract ramdisk (from OFFICIAL_BOOT_URL or repo)
         run: |
@@ -89,10 +95,10 @@ jobs:
           elif [ -n "${{ env.OFFICIAL_BOOT_URL }}" ]; then
             echo "Downloading official boot.img from OFFICIAL_BOOT_URL"
             wget -q "${{ env.OFFICIAL_BOOT_URL }}" -O build_artifacts/official_boot.img
-            # извлекаем ramdisk с помощью abootimg (или unmkbootimg)
+            # извлекаем ramdisk с помощью abootimg
             if command -v abootimg >/dev/null 2>&1; then
-              abootimg -x build_artifacts/official_boot.img
-              # abootimg распакует ramdisk.cpio.gz или ramdisk.img в текущую директорию
+              abootimg -x build_artifacts/official_boot.img || true
+              # abootimg может распаковать ramdisk.cpio.gz или ramdisk.img
               if [ -f ramdisk.cpio.gz ]; then
                 mv ramdisk.cpio.gz build_artifacts/ramdisk.img
               elif [ -f ramdisk.img ]; then
@@ -115,7 +121,9 @@ jobs:
           mkdir -p build_artifacts
           if [ -f ${OUT_DIR}/arch/arm64/boot/Image.gz ]; then
             # объединяем kernel + dtb (если требуется)
-            cat ${OUT_DIR}/arch/arm64/boot/Image.gz ${OUT_DIR}/arch/arm64/boot/dts/*.dtb > build_artifacts/Image.gz-dtb || true
+            if ls ${OUT_DIR}/arch/arm64/boot/dts/*.dtb >/dev/null 2>&1; then
+              cat ${OUT_DIR}/arch/arm64/boot/Image.gz ${OUT_DIR}/arch/arm64/boot/dts/*.dtb > build_artifacts/Image.gz-dtb || true
+            fi
             cp ${OUT_DIR}/arch/arm64/boot/Image.gz build_artifacts/Image.gz || true
           else
             cp ${OUT_DIR}/arch/arm64/boot/Image build_artifacts/Image || true
@@ -157,7 +165,7 @@ jobs:
           # Копируем артефакты в anykernel
           cp build_artifacts/boot.img anykernel/boot.img || true
           cp build_artifacts/dtbo.img anykernel/dtbo.img || true
-          # Если нужно, добавь vendor_boot/init_boot в anykernel перед упаковкой
+          # При необходимости добавь vendor_boot/init_boot в anykernel перед упаковкой
           cd anykernel
           zip -r9 ../ShiroNeko-AnyKernel.zip . -x .git\* || true
           cd ..
@@ -171,8 +179,9 @@ jobs:
             build_artifacts/dtbo.img
             ShiroNeko-AnyKernel.zip
             ${OUT_DIR}/.config
+            ${OUT_DIR}/build.log
 
       - name: Success message
         run: |
-          echo "Build finished. Artifacts uploaded. For testing: fastboot flash boot boot.img"
+          echo "Build finished. Artifacts uploaded. Test boot.img via fastboot: fastboot flash boot boot.img"
           echo "If device uses AVB, test with: fastboot --disable-verity --disable-verification flash vbmeta vbmeta.img (manual step)."
