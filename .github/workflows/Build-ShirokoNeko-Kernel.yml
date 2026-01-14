@@ -7,11 +7,14 @@ env:
   OUT_DIR: out
   DEFCONFIG: Xinran_PocoF6Pro_defconfig
   CLANG_VER: 15
+  # Опционально: укажи URL официального boot.img (LineageOS 23) чтобы workflow извлёк ramdisk автоматически
+  OFFICIAL_BOOT_URL: ''
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+
       - name: Checkout source
         uses: actions/checkout@v4
         with:
@@ -21,11 +24,12 @@ jobs:
       - name: Install system packages and Python tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex git libelf-dev libssl-dev python3 python3-pip zip wget rsync dwarves
-          sudo apt-get install -y clang-${{ env.CLANG_VER }} lld-${{ env.CLANG_VER }} gcc-aarch64-linux-gnu mkbootimg
-          pip3 install avbtool
+          sudo apt-get install -y \
+            bc bison build-essential flex git libelf-dev libssl-dev python3 python3-pip zip wget rsync dwarves \
+            clang-${{ env.CLANG_VER }} lld-${{ env.CLANG_VER }} gcc-aarch64-linux-gnu mkbootimg abootimg
+          # avbtool не на PyPI — клонируем AOSP external/avb ниже и создаём wrapper
 
-      - name: Prepare clang wrappers
+      - name: Prepare workspace bin and clang wrappers
         run: |
           mkdir -p $GITHUB_WORKSPACE/bin
           for tool in clang ld.lld llvm-nm llvm-ar llvm-objcopy llvm-objdump llvm-strip llvm-readelf llvm-size; do
@@ -34,12 +38,34 @@ jobs:
             fi
           done
           echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
+          export PATH=$GITHUB_WORKSPACE/bin:$PATH
+
+      - name: Get avbtool from AOSP and create wrapper
+        run: |
+          git clone --depth 1 https://android.googlesource.com/platform/external/avb avb || true
+          # wrapper запускает avbtool.py из клонированного репо
+          cat > $GITHUB_WORKSPACE/bin/avbtool <<'EOF'
+          #!/usr/bin/env bash
+          python3 "$(dirname "$0")/../avb/avbtool.py" "$@"
+          EOF
+          chmod +x $GITHUB_WORKSPACE/bin/avbtool
+          echo "$GITHUB_WORKSPACE/bin" >> $GITHUB_PATH
+
+      - name: Show environment
+        run: |
+          echo "ARCH=${ARCH}"
+          echo "OUT_DIR=${OUT_DIR}"
+          echo "DEFCONFIG=${DEFCONFIG}"
+          clang --version || true
+          aarch64-linux-gnu-gcc --version || true
+          python3 --version
 
       - name: Configure kernel defconfig and options
         run: |
           export ARCH=${ARCH}
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
           make O=${OUT_DIR} ${DEFCONFIG}
+          # Включаем критичные опции для Android 16 / LOS23
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_INIT_BOOT || true
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_SECURITY_SELINUX || true
           scripts/config --file ${OUT_DIR}/.config --enable CONFIG_KSU || true
@@ -49,19 +75,48 @@ jobs:
         run: |
           export ARCH=${ARCH}
           export PATH=$GITHUB_WORKSPACE/bin:$PATH
+          # CC=clang, LD=ld.lld; CROSS_COMPILE left for helper tools
           make -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image.gz dtbs dtboimg || \
           make -j$(nproc) O=${OUT_DIR} CC=clang LD=ld.lld LLVM=1 CROSS_COMPILE=aarch64-linux-gnu- Image dtbs dtboimg
 
-      - name: Prepare ramdisk placeholder
+      - name: Obtain or extract ramdisk (from OFFICIAL_BOOT_URL or repo)
         run: |
-          mkdir -p build_artifacts
-          echo "Place a compatible ramdisk at tools/ramdisk.img before running this workflow." || true
+          mkdir -p build_artifacts tools
+          # Если в репо уже есть tools/ramdisk.img — используем его
+          if [ -f tools/ramdisk.img ]; then
+            cp tools/ramdisk.img build_artifacts/ramdisk.img
+            echo "Using ramdisk from tools/ramdisk.img"
+          elif [ -n "${{ env.OFFICIAL_BOOT_URL }}" ]; then
+            echo "Downloading official boot.img from OFFICIAL_BOOT_URL"
+            wget -q "${{ env.OFFICIAL_BOOT_URL }}" -O build_artifacts/official_boot.img
+            # извлекаем ramdisk с помощью abootimg (или unmkbootimg)
+            if command -v abootimg >/dev/null 2>&1; then
+              abootimg -x build_artifacts/official_boot.img
+              # abootimg распакует ramdisk.cpio.gz или ramdisk.img в текущую директорию
+              if [ -f ramdisk.cpio.gz ]; then
+                mv ramdisk.cpio.gz build_artifacts/ramdisk.img
+              elif [ -f ramdisk.img ]; then
+                mv ramdisk.img build_artifacts/ramdisk.img
+              else
+                echo "ERROR: ramdisk not found after abootimg extraction" >&2
+                exit 1
+              fi
+            else
+              echo "ERROR: abootimg not installed" >&2
+              exit 1
+            fi
+          else
+            echo "No ramdisk provided. Place tools/ramdisk.img or set OFFICIAL_BOOT_URL." >&2
+            exit 1
+          fi
 
       - name: Create Image.gz-dtb and collect dtbo
         run: |
           mkdir -p build_artifacts
           if [ -f ${OUT_DIR}/arch/arm64/boot/Image.gz ]; then
+            # объединяем kernel + dtb (если требуется)
             cat ${OUT_DIR}/arch/arm64/boot/Image.gz ${OUT_DIR}/arch/arm64/boot/dts/*.dtb > build_artifacts/Image.gz-dtb || true
+            cp ${OUT_DIR}/arch/arm64/boot/Image.gz build_artifacts/Image.gz || true
           else
             cp ${OUT_DIR}/arch/arm64/boot/Image build_artifacts/Image || true
           fi
@@ -73,30 +128,36 @@ jobs:
         run: |
           set -e
           cd build_artifacts
-          RAMDISK_PATH="${GITHUB_WORKSPACE}/tools/ramdisk.img"
+          RAMDISK_PATH="build_artifacts/ramdisk.img"
           if [ ! -f "${RAMDISK_PATH}" ]; then
-            echo "ERROR: ramdisk.img not found at ${RAMDISK_PATH}. Place compatible ramdisk there." >&2
+            echo "ERROR: ramdisk.img not found at ${RAMDISK_PATH}" >&2
             exit 1
           fi
           if [ -f Image.gz-dtb ]; then
             KERNEL_IMAGE="Image.gz-dtb"
+          elif [ -f Image.gz ]; then
+            KERNEL_IMAGE="Image.gz"
           elif [ -f Image ]; then
             KERNEL_IMAGE="Image"
           else
             echo "ERROR: kernel image not found" >&2
             exit 1
           fi
+          # --- ВАЖНО: подставь CMDLINE, BASE и PAGESIZE из официального boot.img если знаешь ---
           CMDLINE="console=ttyMSM0,115200n8 androidboot.hardware=qcom"
           BASE="0x40000000"
           PAGESIZE="4096"
           mkbootimg --kernel ${KERNEL_IMAGE} --ramdisk ${RAMDISK_PATH} --cmdline "${CMDLINE}" --base ${BASE} --pagesize ${PAGESIZE} -o boot.img
+          ls -lah boot.img || true
 
       - name: Prepare AnyKernel3 package
         run: |
           rm -rf anykernel
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3 anykernel || true
+          # Копируем артефакты в anykernel
           cp build_artifacts/boot.img anykernel/boot.img || true
           cp build_artifacts/dtbo.img anykernel/dtbo.img || true
+          # Если нужно, добавь vendor_boot/init_boot в anykernel перед упаковкой
           cd anykernel
           zip -r9 ../ShiroNeko-AnyKernel.zip . -x .git\* || true
           cd ..
@@ -113,4 +174,5 @@ jobs:
 
       - name: Success message
         run: |
-          echo "Build finished. Download artifacts from Actions. Test boot.img via fastboot."
+          echo "Build finished. Artifacts uploaded. For testing: fastboot flash boot boot.img"
+          echo "If device uses AVB, test with: fastboot --disable-verity --disable-verification flash vbmeta vbmeta.img (manual step)."
